@@ -1,0 +1,6 @@
+@import "tailwindcss";
+@plugin "daisyui" {
+  themes: light --default, dark --prefersdark;
+}
+
+:focus-visible { outline: 3px solid var(--color-primary); outline-offset: 3px; }

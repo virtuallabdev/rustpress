@@ -1,0 +1,21 @@
+{
+  "name": "rustpress-web",
+  "private": true,
+  "workspaces": ["web/admin", "web/theme"],
+  "engines": {"node": ">=26.0.0"},
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "dev:admin": "npm run dev --workspace=@rustpress/admin",
+    "dev:theme": "npm run dev --workspace=@rustpress/theme",
+    "test:integration": "node scripts/test-postgres.mjs",
+    "test:e2e": "node scripts/test-postgres.mjs --web"
+  },
+  "devDependencies": {
+    "embedded-postgres": "18.4.0-beta.17",
+    "typescript": "6.0.3"
+  },
+  "overrides": {
+    "typescript": "$typescript"
+  }
+}

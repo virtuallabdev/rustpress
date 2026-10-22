@@ -1,0 +1,11 @@
+.git
+target
+node_modules
+**/node_modules
+**/.nuxt
+**/.output
+.env
+.env.*
+data
+tests
+scripts

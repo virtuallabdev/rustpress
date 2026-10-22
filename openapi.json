@@ -1,0 +1,156 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RustPress API",
+    "version": "0.1.0",
+    "description": "Single-site CMS. Agent credentials are draft-only. Cookie mutations require the exact admin Origin. All published custom fields are public. See docs/agents.txt and README.md for operational restrictions."
+  },
+  "servers": [{"url": "/"}],
+  "security": [{"bearer": []}, {"session": []}],
+  "components": {
+    "securitySchemes": {
+      "bearer": {"type": "http", "scheme": "bearer"},
+      "session": {"type": "apiKey", "in": "cookie", "name": "rp_session"}
+    },
+    "parameters": {
+      "id": {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+      "slug": {"name": "slug", "in": "path", "required": true, "schema": {"type": "string"}},
+      "name": {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}},
+      "limit": {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+      "offset": {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 100000, "default": 0}},
+      "q": {"name": "q", "in": "query", "schema": {"type": "string", "maxLength": 200}},
+      "type": {"name": "content_type", "in": "query", "schema": {"type": "string", "maxLength": 120}}
+    },
+    "schemas": {
+      "Field": {
+        "type": "object", "additionalProperties": false,
+        "required": ["key", "label", "kind"],
+        "properties": {
+          "key": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+          "label": {"type": "string", "maxLength": 120},
+          "kind": {"enum": ["text", "number", "boolean", "date", "media", "relation"]},
+          "required": {"type": "boolean", "default": false}
+        }
+      },
+      "Block": {
+        "oneOf": [
+          {"type": "object", "additionalProperties": false, "required": ["kind", "text"], "properties": {"kind": {"const": "paragraph"}, "text": {"type": "string", "maxLength": 50000}}},
+          {"type": "object", "additionalProperties": false, "required": ["kind", "text", "level"], "properties": {"kind": {"const": "heading"}, "text": {"type": "string", "maxLength": 500}, "level": {"type": "integer", "minimum": 2, "maximum": 6}}},
+          {"type": "object", "additionalProperties": false, "required": ["kind", "media_id", "alt"], "properties": {"kind": {"const": "image"}, "media_id": {"type": "string", "format": "uuid"}, "alt": {"type": "string", "maxLength": 500}}}
+        ]
+      },
+      "Seo": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "description": {"type": "string", "maxLength": 500},
+          "canonical": {"type": ["string", "null"], "description": "Relative path or absolute HTTPS URL"},
+          "noindex": {"type": "boolean", "default": false}
+        }
+      },
+      "ContentInput": {
+        "type": "object", "additionalProperties": false,
+        "required": ["content_type", "slug", "title", "blocks", "status", "publish_at"],
+        "properties": {
+          "content_type": {"type": "string"},
+          "slug": {"type": "string", "maxLength": 120, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+          "title": {"type": "string", "maxLength": 300},
+          "blocks": {"type": "array", "maxItems": 500, "items": {"$ref": "#/components/schemas/Block"}},
+          "fields": {"type": "object", "description": "Values must conform to the content type fields plus extra_fields"},
+          "extra_fields": {"type": "array", "items": {"$ref": "#/components/schemas/Field"}, "description": "Only admins may change per-document schema"},
+          "seo": {"$ref": "#/components/schemas/Seo"},
+          "status": {"enum": ["draft", "published", "archived"]},
+          "publish_at": {"type": "string", "format": "date-time"},
+          "version": {"type": ["integer", "null"], "description": "Omit on POST. Required and equal to current version on PUT"}
+        }
+      },
+      "Content": {
+        "allOf": [
+          {"$ref": "#/components/schemas/ContentInput"},
+          {"type": "object", "properties": {
+            "id": {"type": "string", "format": "uuid"}, "author_id": {"type": ["string", "null"], "format": "uuid"},
+            "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}
+          }}
+        ]
+      },
+      "Navigation": {
+        "type": "array", "maxItems": 30,
+        "items": {"$ref": "#/components/schemas/NavItem"}
+      },
+      "NavItem": {
+        "type": "object", "additionalProperties": false, "required": ["label", "href"],
+        "properties": {
+          "label": {"type": "string", "maxLength": 120},
+          "href": {"type": "string", "description": "Relative path or absolute HTTPS URL"},
+          "children": {"$ref": "#/components/schemas/Navigation"}
+        }
+      },
+      "Error": {
+        "type": "object", "required": ["error"],
+        "properties": {"error": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "integer"}, "message": {"type": "string"}}}}
+      }
+    },
+    "responses": {
+      "ok": {"description": "Success; JSON object or documented pagination envelope"},
+      "invalid": {"description": "Invalid request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "unauthorized": {"description": "Missing, expired or invalid credential"},
+      "forbidden": {"description": "Insufficient privilege or invalid Origin"},
+      "missing": {"description": "Resource not found"},
+      "conflict": {"description": "Duplicate slug or stale version; reconcile before retrying"}
+    }
+  },
+  "paths": {
+    "/health/live": {"get": {"operationId": "liveness", "security": [], "responses": {"200": {"$ref": "#/components/responses/ok"}}}},
+    "/health/ready": {"get": {"operationId": "readiness", "security": [], "responses": {"200": {"$ref": "#/components/responses/ok"}, "500": {"description": "Database unavailable"}}}},
+    "/api/v1/auth/providers": {"get": {"operationId": "authProviders", "security": [], "responses": {"200": {"description": "Configured provider names", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "string"}}}}}}}},
+    "/api/v1/auth/me": {"get": {"operationId": "currentActor", "responses": {"200": {"$ref": "#/components/responses/ok"}, "401": {"$ref": "#/components/responses/unauthorized"}}}},
+    "/api/v1/auth/logout": {"post": {"operationId": "logout", "responses": {"204": {"description": "Credential revoked and session cookie cleared"}}}},
+    "/api/v1/types": {"get": {"operationId": "listContentTypes", "responses": {"200": {"description": "Array of {slug,name,fields}"}}}},
+    "/api/v1/types/{slug}": {
+      "parameters": [{"$ref": "#/components/parameters/slug"}],
+      "put": {"operationId": "saveContentType", "description": "Admin only; rejects schema changes invalidating stored documents",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["name", "fields"], "properties": {"name": {"type": "string"}, "fields": {"type": "array", "items": {"$ref": "#/components/schemas/Field"}}}}}}},
+        "responses": {"200": {"$ref": "#/components/responses/ok"}, "400": {"$ref": "#/components/responses/invalid"}, "403": {"$ref": "#/components/responses/forbidden"}}}
+    },
+    "/api/v1/contents": {
+      "get": {"operationId": "listEditorialContents", "parameters": [{"$ref": "#/components/parameters/limit"}, {"$ref": "#/components/parameters/offset"}, {"$ref": "#/components/parameters/q"}, {"$ref": "#/components/parameters/type"}], "responses": {"200": {"description": "{items: Content[], limit: integer, offset: integer}; authors see only own documents"}}},
+      "post": {"operationId": "createContent", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContentInput"}}}}, "responses": {"201": {"description": "Created Content"}, "400": {"$ref": "#/components/responses/invalid"}, "403": {"$ref": "#/components/responses/forbidden"}, "409": {"$ref": "#/components/responses/conflict"}}}
+    },
+    "/api/v1/contents/{id}": {
+      "parameters": [{"$ref": "#/components/parameters/id"}],
+      "get": {"operationId": "getEditorialContent", "responses": {"200": {"description": "Content"}, "404": {"$ref": "#/components/responses/missing"}}},
+      "put": {"operationId": "updateContent", "description": "Optimistic locking. Agent/author can only modify drafts; editor/admin may publish/archive.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContentInput"}}}},
+        "responses": {"200": {"description": "Updated Content, version incremented"}, "400": {"$ref": "#/components/responses/invalid"}, "403": {"$ref": "#/components/responses/forbidden"}, "409": {"$ref": "#/components/responses/conflict"}}}
+    },
+    "/api/v1/contents/{id}/revisions": {
+      "parameters": [{"$ref": "#/components/parameters/id"}],
+      "get": {"operationId": "listRevisions", "parameters": [{"$ref": "#/components/parameters/limit"}, {"$ref": "#/components/parameters/offset"}], "responses": {"200": {"description": "{items:[{id,version,snapshot,created_at}],limit,offset}; restore by PUT with current version"}}}
+    },
+    "/api/v1/navigation/{name}": {
+      "parameters": [{"$ref": "#/components/parameters/name"}],
+      "put": {"operationId": "saveNavigation", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Navigation"}}}}, "responses": {"204": {"description": "Saved; editor/admin only"}}}
+    },
+    "/api/v1/media": {
+      "get": {"operationId": "listMedia", "parameters": [{"$ref": "#/components/parameters/limit"}, {"$ref": "#/components/parameters/offset"}], "responses": {"200": {"description": "{items:[{id,alt,width,height,variants,created_at}],limit,offset}"}}},
+      "post": {"operationId": "uploadImage", "description": "10 MiB total request, 25 megapixels, JPEG/PNG/WebP. Agent tokens forbidden. Generated variants are public.",
+        "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {"type": "object", "required": ["file", "alt"], "properties": {"file": {"type": "string", "format": "binary"}, "alt": {"type": "string", "maxLength": 500}}}}}},
+        "responses": {"200": {"description": "{id,alt,width,height,variants:[{width,url}]}"}, "400": {"$ref": "#/components/responses/invalid"}, "413": {"description": "Upload too large"}, "429": {"description": "Image workers busy"}}}
+    },
+    "/api/v1/public/contents": {
+      "get": {"operationId": "listPublishedContents", "security": [], "parameters": [{"$ref": "#/components/parameters/limit"}, {"$ref": "#/components/parameters/offset"}, {"$ref": "#/components/parameters/q"}, {"$ref": "#/components/parameters/type"}], "responses": {"200": {"description": "{items:[{id,content_type,slug,title,blocks,fields,seo,publish_at,updated_at}],limit,offset}. Only published and due content."}}}
+    },
+    "/api/v1/public/contents/{slug}": {
+      "parameters": [{"$ref": "#/components/parameters/slug"}],
+      "get": {"operationId": "getPublishedContent", "security": [], "responses": {"200": {"description": "Public content"}, "404": {"$ref": "#/components/responses/missing"}}}
+    },
+    "/api/v1/public/navigation/{name}": {
+      "parameters": [{"$ref": "#/components/parameters/name"}],
+      "get": {"operationId": "getNavigation", "security": [], "responses": {"200": {"description": "Navigation array"}}}
+    },
+    "/api/v1/public/media/{id}": {
+      "parameters": [{"$ref": "#/components/parameters/id"}],
+      "get": {"operationId": "getPublicMedia", "security": [], "responses": {"200": {"description": "{id,alt,width,height,variants:[{width,url}]}"}, "404": {"$ref": "#/components/responses/missing"}}}
+    },
+    "/api/v1/public/sitemap.xml": {"get": {"operationId": "sitemap", "security": [], "responses": {"200": {"description": "XML sitemap, no noindex/draft/future content"}}}}
+  }
+}

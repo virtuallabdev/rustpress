@@ -1,0 +1,79 @@
+# Local development stack. See README before production deployment.
+name: rustpress
+services:
+  db:
+    image: postgres:18.6-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc
+    environment:
+      POSTGRES_DB: rustpress
+      POSTGRES_USER: rustpress
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a generated URL-safe database password}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rustpress -d rustpress"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://rustpress:${POSTGRES_PASSWORD:?Set database password}@db:5432/rustpress
+      BIND_ADDR: 0.0.0.0:8080
+      MEDIA_DIR: /data/media
+      RUSTPRESS_ENV: development
+      ADMIN_ORIGIN: http://localhost:3001
+      SITE_ORIGIN: http://localhost:3000
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+      META_CLIENT_ID: ${META_CLIENT_ID:-}
+      META_CLIENT_SECRET: ${META_CLIENT_SECRET:-}
+    volumes:
+      - media:/data/media
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+  admin:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      args:
+        APP: admin
+    environment:
+      NUXT_API_INTERNAL: http://api:8080
+    ports: ["127.0.0.1:3001:3000"]
+    depends_on: [api]
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+  theme:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      args:
+        APP: theme
+    environment:
+      NUXT_API_INTERNAL: http://api:8080
+      NUXT_PUBLIC_SITE_ORIGIN: http://localhost:3000
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [api]
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+volumes:
+  postgres:
+  media:
