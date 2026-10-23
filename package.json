@@ -9,6 +9,7 @@
     "dev:admin": "npm run dev --workspace=@rustpress/admin",
     "dev:theme": "npm run dev --workspace=@rustpress/theme",
     "test:integration": "node scripts/test-postgres.mjs",
+    "test:integration:docker": "node scripts/test-postgres-docker.mjs",
     "test:e2e": "node scripts/test-postgres.mjs --web",
     "test:browser": "node scripts/test-postgres.mjs --web --playwright"
   },

@@ -85,17 +85,48 @@ usare `wsl --exec docker` al posto di `docker` se il comando Windows non esiste.
 Le variabili per Compose devono essere disponibili nel processo WSL; non
 presumere che le variabili PowerShell siano inoltrate automaticamente.
 
-Da PowerShell, assegnare una password generata, URL-safe, nella sessione:
+**Per provare RustPress completo usare questo stack**, non
+`compose.integration.yaml` (riservato ai test automatici del solo backend).
+Compose avvia insieme PostgreSQL, API Axum, amministrazione Nuxt e tema pubblico;
+l'API attende PostgreSQL sano e applica le migrazioni automaticamente.
+
+Da PowerShell con Docker disponibile direttamente, assegnare una password
+generata, URL-safe, nella sessione:
 
 ```powershell
 $env:POSTGRES_PASSWORD = '<GENERATED_URL_SAFE_PASSWORD>'
-docker compose up --build -d
+docker compose up --build -d --wait
 docker compose ps
 ```
+
+Su questa macchina, con Docker in **WSL**, usare invece:
+
+```powershell
+$env:POSTGRES_PASSWORD = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
+$env:WSLENV = (@($env:WSLENV, 'POSTGRES_PASSWORD') | Where-Object { $_ }) -join ':'
+wsl --exec docker compose up --build -d --wait
+wsl --exec docker compose ps
+```
+
+Conservare la stessa password per i successivi avvii: cambiarla nella variabile
+non cambia la password del database gia inizializzato nel volume.
 
 Tema: `http://localhost:3000`. Amministrazione: `http://localhost:3001`.
 Database e API non pubblicano porte host. I volumi `postgres` e `media` sono
 persistenti: non eliminarli durante aggiornamenti o arresti ordinari.
+
+Gli healthcheck dei frontend verificano anche il proxy verso Axum e, per il
+tema, una lettura dal database. Per log e arresto senza perdere i dati:
+
+```powershell
+wsl --exec docker compose logs --tail 100 api db admin theme
+wsl --exec docker compose down
+```
+
+Per accedere al back office occorre configurare almeno un provider OAuth e
+autorizzare un'identita come descritto in **Login e primo amministratore**.
+Senza credenziali OAuth sono comunque verificabili sito pubblico, schermata
+di accesso e connessione al database.
 
 Lo stack e **solo per sviluppo locale**: cookie non-Secure, origini localhost.
 Non esporlo a Internet invariato. Vedere [operazioni](docs/operations.md).
@@ -105,6 +136,21 @@ Rust da WSL/container vanno in timeout. La build Linux dell'API e stata quindi
 verificata offline con dipendenze vendorizzate dal lockfile, senza disabilitare
 TLS; le due immagini Nuxt sono state costruite normalmente. Il Dockerfile API
 distribuito usa invece Cargo online e richiede accesso a crates.io.
+
+Su questo host sono gia presenti le immagini di verifica. Per provare lo
+stack senza ricompilarle, nella stessa sessione PowerShell configurata sopra:
+
+```powershell
+$env:RUSTPRESS_API_IMAGE = 'rustpress-api:verify'
+$env:RUSTPRESS_ADMIN_IMAGE = 'rustpress-admin:verify'
+$env:RUSTPRESS_THEME_IMAGE = 'rustpress-theme:verify'
+$env:WSLENV = (@($env:WSLENV, 'RUSTPRESS_API_IMAGE', 'RUSTPRESS_ADMIN_IMAGE', 'RUSTPRESS_THEME_IMAGE') | Where-Object { $_ }) -join ':'
+wsl --exec docker compose up --no-build -d --wait
+```
+
+Queste immagini rappresentano i sorgenti dell'ultima verifica, non includono
+automaticamente successive modifiche. Su altre macchine costruire le immagini
+con il comando `--build` sopra.
 
 ## Avvio nativo
 
@@ -235,6 +281,42 @@ esegue le migrazioni e il test esplicito, poi arresta ed elimina il cluster.
 La versione embedded e una dipendenza **solo di sviluppo**, non il DB distribuito.
 Il test full-stack richiede prima `npm run build`; usa le due build SSR e
 l'eseguibile Rust prodotto dai test.
+
+### Integrazione DB con Docker Compose
+
+Lo stack del sito e gia definito in [compose.yaml](compose.yaml).
+Per testare le API Rust contro PostgreSQL **18.6 in Docker**, senza avviare
+Nuxt o compilare l'immagine API:
+
+```powershell
+npm run test:integration:docker
+```
+
+Richiede Rust e Docker Compose; su Windows il runner usa automaticamente
+Docker tramite WSL se `docker` non e nel PATH Windows. Non serve configurare
+password o `TEST_DATABASE_URL`: il runner genera credenziali temporanee,
+attende il database e passa la connessione solo al processo di test.
+Ogni esecuzione usa un progetto Compose distinto e una porta host casuale,
+pubblicata solo su `127.0.0.1`.
+
+[compose.integration.yaml](compose.integration.yaml) e indipendente dallo
+stack del sito: dati in tmpfs, nessun volume persistente, nessun accesso ai
+dati locali di RustPress. Al termine, anche se i test falliscono, il runner
+esegue `compose down` sul solo progetto temporaneo. In caso di terminazione
+forzata del processo, rimuovere quel progetto usando il nome
+`rustpress-integration-...` mostrato da Compose:
+
+```powershell
+wsl --exec env TEST_POSTGRES_PASSWORD=cleanup-only docker compose -f compose.integration.yaml -p <TEST_PROJECT_NAME> down
+```
+
+`cleanup-only` serve solo a validare la configurazione durante la rimozione,
+non e una credenziale per accedere al database.
+
+Questa suite verifica migrazioni, transazioni, autorizzazione, traduzioni,
+Markdown e immagini tramite il router Axum con un vero database Docker.
+Il comando originale `test:integration` rimane disponibile con PostgreSQL
+embedded 18.4; non e stato cambiato.
 
 Il test full-stack controlla creazione e pubblicazione reali tramite proxy,
 isolamento API pubbliche, cookie/Origin, escaping XSS, canonical, hreflang, lingue
