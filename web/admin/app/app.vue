@@ -2,6 +2,13 @@
 import type { Actor, Content, ContentInput, ContentType, Field, Media, NavItem, Page, Revision } from '../../shared/types'
 import { errorMessage } from '../../shared/types'
 
+const { t, locale, setLocale } = useI18n()
+const languageCookie = useCookie<'it' | 'en'>('rp_language', { sameSite: 'lax', default: () => 'it' })
+await setLocale(languageCookie.value === 'en' ? 'en' : 'it')
+watch(locale, value => { languageCookie.value = value === 'en' ? 'en' : 'it' })
+useHead({ htmlAttrs: { lang: locale }, title: computed(() => `RustPress | ${t('admin')}`) })
+const contentLocale = ref<'' | 'it' | 'en'>('')
+const navigationLocale = ref<'it' | 'en'>('it')
 const actor = ref<Actor | null>(null)
 const providers = ref<string[]>([])
 const loading = ref(true)
@@ -29,14 +36,15 @@ const schema = computed<Field[]>(() => [
   ...(types.value.find(t => t.slug === draft.value.content_type)?.fields || []), ...draft.value.extra_fields,
 ])
 const extraFieldsJson = ref('[]')
+const editorGeneration = ref(0)
 
 function blank(): ContentInput {
-  return { content_type: 'page', slug: '', title: '', blocks: [], fields: {}, extra_fields: [],
+  return { content_type: 'page', slug: '', title: '', blocks: [], markdown: '', locale: locale.value === 'en' ? 'en' : 'it', fields: {}, extra_fields: [],
     seo: { description: '', canonical: null, noindex: false }, status: 'draft',
     publish_at: new Date().toISOString(), version: null }
 }
 function inputOf(c: Content): ContentInput {
-  return { content_type: c.content_type, slug: c.slug, title: c.title, blocks: c.blocks, fields: c.fields,
+  return { content_type: c.content_type, slug: c.slug, title: c.title, blocks: c.blocks, markdown: c.markdown ?? null, locale: c.locale || 'it', fields: c.fields,
     extra_fields: c.extra_fields, seo: c.seo, status: c.status, publish_at: c.publish_at, version: c.version }
 }
 async function run(operation: () => Promise<void>) {
@@ -46,16 +54,16 @@ async function run(operation: () => Promise<void>) {
   notice.value = ''
   try { await operation() } catch (error) { failure.value = errorMessage(error) } finally { busy.value = false }
 }
-function discardAllowed() { return !dirty.value || window.confirm('Scartare le modifiche non salvate?') }
+function discardAllowed() { return !dirty.value || window.confirm(t('discard')) }
 async function loadList() {
-  const data = await $fetch<Page<Content>>('/api/v1/contents', { query: { limit: 20, offset: offset.value, q: search.value } })
+  const data = await $fetch<Page<Content>>('/api/v1/contents', { query: { limit: 20, offset: offset.value, q: search.value, ...(contentLocale.value ? { locale: contentLocale.value } : {}) } })
   contents.value = data.items
 }
 async function loadResources() {
   const [contentTypes, images, navigation] = await Promise.all([
     $fetch<ContentType[]>('/api/v1/types'),
     $fetch<Page<Media>>('/api/v1/media', { query: { limit: 100 } }),
-    $fetch<NavItem[]>('/api/v1/public/navigation/main'),
+    $fetch<NavItem[]>('/api/v1/public/navigation/main', { query: { locale: navigationLocale.value } }),
   ])
   types.value = contentTypes
   media.value = images.items
@@ -89,7 +97,7 @@ function newContent() {
 }
 function parseArray(value: string): unknown[] {
   const parsed: unknown = JSON.parse(value)
-  if (!Array.isArray(parsed)) throw new Error('Inserire un array JSON')
+  if (!Array.isArray(parsed)) throw new Error(t('arrayRequired'))
   return parsed
 }
 async function applyExtraFields() {
@@ -100,14 +108,14 @@ async function applyExtraFields() {
       if (!field || typeof field !== 'object' || !('key' in field) || typeof field.key !== 'string'
         || !('label' in field) || typeof field.label !== 'string' || !('kind' in field)
         || !['text', 'number', 'boolean', 'date', 'media', 'relation'].some(k => k === field.kind)
-        || ('required' in field && typeof field.required !== 'boolean')) throw new Error('Definizione campo non valida')
+        || ('required' in field && typeof field.required !== 'boolean')) throw new Error(t('invalidField'))
       const kind = field.kind
-      if (kind !== 'text' && kind !== 'number' && kind !== 'boolean' && kind !== 'date' && kind !== 'media' && kind !== 'relation') throw new Error('Tipo campo non valido')
+      if (kind !== 'text' && kind !== 'number' && kind !== 'boolean' && kind !== 'date' && kind !== 'media' && kind !== 'relation') throw new Error(t('invalidKind'))
       fields.push({ key: field.key, label: field.label, kind, required: 'required' in field && field.required === true })
     }
     draft.value.extra_fields = fields
     dirty.value = true
-    notice.value = 'Schema applicato localmente. Compila i campi e salva il contenuto.'
+    notice.value = t('schemaApplied')
   })
 }
 async function save() {
@@ -120,7 +128,7 @@ async function save() {
     draft.value = inputOf(saved)
     selectedId.value = saved.id
     dirty.value = false
-    notice.value = `Salvato: revisione ${saved.version}.`
+    notice.value = t('saved', { version: saved.version })
     await loadList()
   })
 }
@@ -134,23 +142,24 @@ async function showRevisions() {
 function restore(revision: Revision) {
   if (!discardAllowed()) return
   const currentVersion = draft.value.version
-  draft.value = { ...inputOf(revision.snapshot), status: 'draft', version: currentVersion }
+  draft.value = { ...inputOf(revision.snapshot), locale: draft.value.locale, status: 'draft', version: currentVersion }
   extraFieldsJson.value = JSON.stringify(draft.value.extra_fields, null, 2)
+  editorGeneration.value++
   dirty.value = true
-  notice.value = 'Revisione caricata come bozza: controlla e salva per confermare il ripristino.'
+  notice.value = t('restored')
 }
 async function saveType() {
   await run(async () => {
     await $fetch(`/api/v1/types/${encodeURIComponent(typeSlug.value)}`, { method: 'PUT',
       body: { name: typeName.value, fields: parseArray(typeFields.value) } })
     types.value = await $fetch<ContentType[]>('/api/v1/types')
-    notice.value = 'Schema salvato.'
+    notice.value = t('schemaSaved')
   })
 }
 async function saveNavigation() {
   await run(async () => {
-    await $fetch('/api/v1/navigation/main', { method: 'PUT', body: parseArray(navigationJson.value) })
-    notice.value = 'Navigazione salvata.'
+    await $fetch('/api/v1/navigation/main', { method: 'PUT', query: { locale: navigationLocale.value }, body: parseArray(navigationJson.value) })
+    notice.value = t('navigationSaved')
   })
 }
 function selectFile(event: Event) {
@@ -158,13 +167,49 @@ function selectFile(event: Event) {
 }
 async function upload() {
   await run(async () => {
-    if (!selectedFile.value) throw new Error('Seleziona un file immagine')
+    if (!selectedFile.value) throw new Error(t('selectImage'))
     const form = new FormData()
     form.append('file', selectedFile.value)
     form.append('alt', alt.value)
     const uploaded = await $fetch<Media>('/api/v1/media', { method: 'POST', body: form })
     media.value.unshift(uploaded)
-    notice.value = `Immagine caricata: ${uploaded.id}. Le varianti sono pubbliche.`
+    notice.value = t('imageUploaded', { id: uploaded.id })
+  })
+}
+async function loadNavigation() {
+  await run(async () => {
+    const navigation = await $fetch<NavItem[]>('/api/v1/public/navigation/main', { query: { locale: navigationLocale.value } })
+    navigationJson.value = JSON.stringify(navigation, null, 2)
+  })
+}
+function translate() {
+  if (!selectedId.value || !discardAllowed()) return
+  const sourceId = selectedId.value
+  draft.value = { ...structuredClone(toRaw(draft.value)), locale: draft.value.locale === 'it' ? 'en' : 'it',
+    translation_of: sourceId, slug: '', status: 'draft', version: null, seo: { description: '', canonical: null, noindex: false } }
+  selectedId.value = null
+  revisions.value = []
+  extraFieldsJson.value = JSON.stringify(draft.value.extra_fields, null, 2)
+  dirty.value = true
+  notice.value = t('translationHelp')
+}
+async function convertLegacy() {
+  await run(async () => {
+    const escape = (text: string) => text.replace(/[\\`*_{}[\]()#+.!<>~-]/g, '\\$&')
+    const parts: string[] = []
+    for (const block of draft.value.blocks) {
+      if (block.kind === 'paragraph') parts.push(escape(block.text))
+      else if (block.kind === 'heading') parts.push(`${'#'.repeat(block.level)} ${escape(block.text)}`)
+      else {
+        const image = media.value.find(m => m.id === block.media_id) || await $fetch<Media>(`/api/v1/public/media/${block.media_id}`)
+        const url = image.variants.at(-1)?.url
+        if (!url) throw new Error(t('imageUnavailable', { alt: block.alt }))
+        parts.push(`![${escape(block.alt)}](${url})`)
+      }
+    }
+    draft.value.markdown = parts.join('\n\n')
+    draft.value.blocks = []
+    dirty.value = true
   })
 }
 async function logout() {
@@ -198,78 +243,69 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
 
 <template>
   <NuxtRouteAnnouncer />
-  <a class="btn btn-primary absolute -top-20 focus:top-2" href="#main">Vai al contenuto</a>
+  <a class="btn btn-primary absolute -top-20 focus:top-2" href="#main">{{ t('skip') }}</a>
   <header class="navbar bg-base-200 px-6 gap-4">
     <span class="text-xl font-bold flex-1">RustPress <span class="badge">0.1</span></span>
     <span v-if="actor">{{ actor.role }}</span>
-    <button v-if="actor" class="btn btn-ghost" :disabled="busy" @click="logout">Esci</button>
+    <label class="flex gap-2 items-center">{{ t('language') }}<select :value="locale" :aria-label="t('language')" class="select select-sm" @change="setLocale(($event.target as HTMLSelectElement).value === 'en' ? 'en' : 'it')"><option value="it">Italiano</option><option value="en">English</option></select></label>
+    <button v-if="actor" class="btn btn-ghost" :disabled="busy" @click="logout">{{ t('logout') }}</button>
   </header>
   <main id="main" class="max-w-7xl mx-auto p-6">
     <div v-if="failure" role="alert" class="alert alert-error mb-4">{{ failure }}</div>
     <div v-if="notice" role="status" class="alert alert-success mb-4">{{ notice }}</div>
-    <p v-if="loading" role="status">Caricamento...</p>
+    <p v-if="loading" role="status">{{ t('loading') }}</p>
     <section v-else-if="!actor" class="card bg-base-200 max-w-xl mx-auto my-12">
       <div class="card-body">
-        <h1 class="card-title">Accedi all'amministrazione</h1>
-        <p>Accesso riservato alle identita autorizzate dall'operatore.</p>
-        <a v-for="provider in providers" :key="provider" class="btn btn-primary mt-2" :href="`/api/v1/auth/${provider}/login`">Accedi con {{ provider }}</a>
-        <p v-if="!providers.length" class="alert alert-warning">Nessun provider configurato. Consulta la guida di installazione.</p>
+        <h1 class="card-title">{{ t('login') }}</h1>
+        <p>{{ t('invitedOnly') }}</p>
+        <a v-for="provider in providers" :key="provider" class="btn btn-primary mt-2" :href="`/api/v1/auth/${provider}/login`">{{ t('loginWith', { provider }) }}</a>
+        <p v-if="!providers.length" class="alert alert-warning">{{ t('noProviders') }}</p>
       </div>
     </section>
     <template v-else>
-      <nav aria-label="Amministrazione" class="flex flex-wrap gap-2 mb-6">
+      <nav :aria-label="t('admin')" class="flex flex-wrap gap-2 mb-6">
         <button v-for="item in ['contents', 'media', ...(actor.role === 'admin' ? ['schemas'] : []), ...(editorial ? ['navigation'] : [])]" :key="item"
           class="btn" :class="{ 'btn-primary': tab === item }" :aria-current="tab === item ? 'page' : undefined" @click="tab = item">
-          {{ ({ contents: 'Contenuti', media: 'Media', schemas: 'Schemi', navigation: 'Navigazione' })[item] }}
+          {{ t(item) }}
         </button>
       </nav>
       <section v-if="tab === 'contents'" class="grid lg:grid-cols-[20rem_1fr] gap-8">
         <aside>
-          <h1 class="text-2xl font-bold mb-4">Contenuti</h1>
-          <button class="btn btn-primary mb-4" :disabled="busy" @click="newContent">Nuovo contenuto</button>
+          <h1 class="text-2xl font-bold mb-4">{{ t('contents') }}</h1>
+          <button class="btn btn-primary mb-4" :disabled="busy" @click="newContent">{{ t('newContent') }}</button>
+          <label class="fieldset">{{ t('contentLanguage') }}<select v-model="contentLocale" :aria-label="t('contentLanguage')" class="select" @change="run(async () => { offset = 0; await loadList() })"><option value="">{{ t('allLanguages') }}</option><option value="it">Italiano</option><option value="en">English</option></select></label>
           <form class="flex gap-2 mb-4" @submit.prevent="run(async () => { offset = 0; await loadList() })">
-            <input v-model="search" aria-label="Cerca contenuti" type="search" class="input w-full" maxlength="200">
-            <button class="btn" :disabled="busy">Cerca</button>
+            <input v-model="search" :aria-label="t('searchContents')" type="search" class="input w-full" maxlength="200">
+            <button class="btn" :disabled="busy">{{ t('search') }}</button>
           </form>
           <ul class="menu w-full p-0">
             <li v-for="content in contents" :key="content.id"><button :disabled="busy" @click="edit(content.id)">
-              <span>{{ content.title }}</span><span class="badge badge-outline">{{ content.status }}</span>
+              <span>{{ content.title }}</span><span class="badge">{{ content.locale }}</span><span class="badge badge-outline">{{ t(content.status) }}</span>
             </button></li>
           </ul>
           <div class="flex gap-2 mt-4">
-            <button class="btn btn-sm" :disabled="busy || offset === 0" @click="run(async () => { offset -= 20; await loadList() })">Precedenti</button>
-            <button class="btn btn-sm" :disabled="busy || contents.length < 20" @click="run(async () => { offset += 20; await loadList() })">Successivi</button>
+            <button class="btn btn-sm" :disabled="busy || offset === 0" @click="run(async () => { offset -= 20; await loadList() })">{{ t('previous') }}</button>
+            <button class="btn btn-sm" :disabled="busy || contents.length < 20" @click="run(async () => { offset += 20; await loadList() })">{{ t('next') }}</button>
           </div>
         </aside>
         <form class="space-y-5" @submit.prevent="save" @input="dirty = true" @change="dirty = true">
-          <h2 class="text-2xl font-bold">{{ selectedId ? 'Modifica' : 'Crea' }} <span v-if="dirty" class="badge badge-warning">Non salvato</span></h2>
+          <h2 class="text-2xl font-bold">{{ t(selectedId ? 'edit' : 'create') }} <span v-if="dirty" class="badge badge-warning">{{ t('unsaved') }}</span></h2>
+          <label class="fieldset">{{ t('contentLanguage') }}<select v-model="draft.locale" :aria-label="t('contentLanguage')" class="select" :disabled="!!selectedId || !!draft.translation_of"><option value="it">Italiano</option><option value="en">English</option></select></label>
+          <button v-if="selectedId" type="button" class="btn" :disabled="busy" @click="translate">{{ t('translate', { language: draft.locale === 'it' ? 'English' : 'Italiano' }) }}</button>
+          <p v-if="draft.translation_of" class="alert">{{ t('translationSource') }}: {{ draft.translation_of }}</p>
           <div class="grid sm:grid-cols-2 gap-4">
-            <label class="fieldset">Tipo<select v-model="draft.content_type" class="select w-full" :disabled="!!selectedId"><option v-for="type in types" :key="type.slug" :value="type.slug">{{ type.name }}</option></select></label>
-            <label class="fieldset">Slug<input v-model="draft.slug" class="input w-full" required maxlength="120" pattern="[a-z0-9]+(-[a-z0-9]+)*"></label>
+            <label class="fieldset">{{ t('type') }}<select v-model="draft.content_type" :aria-label="t('type')" class="select w-full" :disabled="!!selectedId || !!draft.translation_of"><option v-for="type in types" :key="type.slug" :value="type.slug">{{ type.name }}</option></select></label>
+            <label class="fieldset">{{ t('slug') }}<input v-model="draft.slug" class="input w-full" required maxlength="120" pattern="[a-z0-9]+(-[a-z0-9]+)*"></label>
           </div>
-          <label class="fieldset">Titolo<input v-model="draft.title" class="input w-full" required maxlength="300"></label>
-          <fieldset class="space-y-4">
-            <legend class="font-semibold mb-3">Blocchi</legend>
-            <div v-for="(block, index) in draft.blocks" :key="index" class="card border border-base-300 p-4 gap-3">
-              <div class="flex gap-2 items-center"><span class="badge flex-1">{{ block.kind }}</span>
-                <button type="button" class="btn btn-sm" :disabled="index === 0" :aria-label="`Sposta blocco ${index + 1} in alto`" @click="draft.blocks.splice(index - 1, 0, ...draft.blocks.splice(index, 1)); dirty = true">Su</button>
-                <button type="button" class="btn btn-sm btn-error" :aria-label="`Rimuovi blocco ${index + 1}`" @click="draft.blocks.splice(index, 1); dirty = true">Rimuovi</button>
-              </div>
-              <label v-if="block.kind !== 'image'" class="fieldset">Testo<textarea v-model="block.text" class="textarea w-full" rows="4"></textarea></label>
-              <label v-if="block.kind === 'heading'" class="fieldset">Livello<select v-model.number="block.level" class="select"><option v-for="level in [2,3,4,5,6]" :key="level" :value="level">H{{ level }}</option></select></label>
-              <template v-if="block.kind === 'image'">
-                <label class="fieldset">Immagine<select v-model="block.media_id" class="select w-full" required><option value="" disabled>Seleziona</option><option v-for="img in media" :key="img.id" :value="img.id">{{ img.alt }}</option></select></label>
-                <label class="fieldset">Testo alternativo<input v-model="block.alt" class="input w-full" maxlength="500"></label>
-              </template>
-            </div>
-            <div class="flex flex-wrap gap-2">
-              <button type="button" class="btn btn-sm" @click="draft.blocks.push({ kind: 'paragraph', text: '' }); dirty = true">+ Paragrafo</button>
-              <button type="button" class="btn btn-sm" @click="draft.blocks.push({ kind: 'heading', text: '', level: 2 }); dirty = true">+ Titolo</button>
-              <button type="button" class="btn btn-sm" @click="draft.blocks.push({ kind: 'image', media_id: '', alt: '' }); dirty = true">+ Immagine</button>
-            </div>
-          </fieldset>
+          <label class="fieldset">{{ t('title') }}<input v-model="draft.title" class="input w-full" required maxlength="300"></label>
+          <section v-if="draft.markdown === null" class="space-y-3">
+            <p class="alert alert-info">{{ t('legacyHelp') }}</p>
+            <pre class="text-sm whitespace-pre-wrap">{{ JSON.stringify(draft.blocks, null, 2) }}</pre>
+            <button type="button" class="btn" :disabled="busy" @click="convertLegacy">{{ t('convert') }}</button>
+          </section>
+          <ClientOnly v-else><MarkdownEditor :key="`${selectedId}:${draft.locale}:${draft.version}:${editorGeneration}`" v-model="draft.markdown" :media="media" @update:model-value="dirty = true" /><template #fallback><p>{{ t('editorLoading') }}</p></template></ClientOnly>
           <fieldset v-if="schema.length" class="grid sm:grid-cols-2 gap-4">
-            <legend class="font-semibold mb-3">Campi personalizzati (pubblici alla pubblicazione)</legend>
+            <legend class="font-semibold mb-3">{{ t('customFields') }}</legend>
             <label v-for="field in schema" :key="field.key" class="fieldset">{{ field.label }} {{ field.required ? '*' : '' }}
               <input v-if="field.kind === 'boolean'" v-model="draft.fields[field.key]" type="checkbox" class="checkbox" :required="false">
               <input v-else-if="field.kind === 'number'" v-model.number="draft.fields[field.key]" type="number" step="any" class="input w-full" :required="field.required">
@@ -277,33 +313,33 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
             </label>
           </fieldset>
           <details v-if="actor.role === 'admin'" class="collapse collapse-arrow border border-base-300">
-            <summary class="collapse-title">Schema aggiuntivo di questa pagina/post</summary>
-            <div class="collapse-content"><label class="fieldset">Array JSON dei campi aggiuntivi<textarea v-model="extraFieldsJson" class="textarea w-full font-mono" rows="6"></textarea></label><button type="button" class="btn btn-sm mt-2" :disabled="busy" @click="applyExtraFields">Applica schema al modulo</button><p>Applica, compila i nuovi campi e salva per rendere persistenti le modifiche.</p></div>
+            <summary class="collapse-title">{{ t('extraSchema') }}</summary>
+            <div class="collapse-content"><label class="fieldset">{{ t('extraJson') }}<textarea v-model="extraFieldsJson" class="textarea w-full font-mono" rows="6"></textarea></label><button type="button" class="btn btn-sm mt-2" :disabled="busy" @click="applyExtraFields">{{ t('applySchema') }}</button><p>{{ t('applyHelp') }}</p></div>
           </details>
           <fieldset class="space-y-3">
             <legend class="font-semibold">SEO e GEO</legend>
-            <label class="fieldset">Descrizione<textarea v-model="draft.seo.description" class="textarea w-full" maxlength="500"></textarea></label>
-            <label class="fieldset">Canonical opzionale<input :value="draft.seo.canonical || ''" class="input w-full" @input="draft.seo.canonical = ($event.target as HTMLInputElement).value || null"></label>
-            <label class="flex gap-2"><input v-model="draft.seo.noindex" type="checkbox" class="checkbox">Escludi dall'indicizzazione</label>
+            <label class="fieldset">{{ t('description') }}<textarea v-model="draft.seo.description" class="textarea w-full" maxlength="500"></textarea></label>
+            <label class="fieldset">{{ t('canonical') }}<input :value="draft.seo.canonical || ''" class="input w-full" @input="draft.seo.canonical = ($event.target as HTMLInputElement).value || null"></label>
+            <label class="flex gap-2"><input v-model="draft.seo.noindex" type="checkbox" class="checkbox">{{ t('noindex') }}</label>
           </fieldset>
-          <label class="fieldset">Pubblicazione (ISO 8601 con fuso, es. 2026-12-01T09:00:00Z)<input v-model="draft.publish_at" class="input w-full" required></label>
-          <label class="fieldset">Stato<select v-model="draft.status" class="select" :disabled="!editorial"><option value="draft">Bozza</option><option v-if="editorial" value="published">Pubblicato / programmato</option><option v-if="editorial" value="archived">Archiviato</option></select></label>
+          <label class="fieldset">{{ t('publication') }}<input v-model="draft.publish_at" class="input w-full" required></label>
+          <label class="fieldset">{{ t('status') }}<select v-model="draft.status" :aria-label="t('status')" class="select" :disabled="!editorial"><option value="draft">{{ t('draft') }}</option><option v-if="editorial" value="published">{{ t('published') }}</option><option v-if="editorial" value="archived">{{ t('archived') }}</option></select></label>
           <div class="flex gap-3">
-            <button class="btn btn-primary" :disabled="busy">Salva</button>
-            <button v-if="selectedId" type="button" class="btn" :disabled="busy" @click="showRevisions">Revisioni</button>
+            <button class="btn btn-primary" :disabled="busy">{{ t('save') }}</button>
+            <button v-if="selectedId" type="button" class="btn" :disabled="busy" @click="showRevisions">{{ t('revisions') }}</button>
           </div>
           <ul v-if="revisions.length" class="menu border border-base-300 rounded-box">
-            <li v-for="revision in revisions" :key="revision.id"><button type="button" @click="restore(revision)">Carica revisione {{ revision.version }} — {{ revision.created_at }}</button></li>
+            <li v-for="revision in revisions" :key="revision.id"><button type="button" @click="restore(revision)">{{ t('loadRevision', { version: revision.version, date: revision.created_at }) }}</button></li>
           </ul>
         </form>
       </section>
       <section v-if="tab === 'media'" class="space-y-6">
-        <h1 class="text-2xl font-bold">Libreria media</h1>
-        <p>JPEG, PNG o WebP; richiesta massima 10 MiB, 25 megapixel. Le varianti caricate sono pubbliche, anche se non usate in contenuti pubblicati.</p>
+        <h1 class="text-2xl font-bold">{{ t('library') }}</h1>
+        <p>{{ t('mediaHelp') }}</p>
         <form class="flex flex-wrap items-end gap-4" @submit.prevent="upload">
-          <label class="fieldset">Immagine<input type="file" accept="image/jpeg,image/png,image/webp" class="file-input" required @change="selectFile"></label>
-          <label class="fieldset">Testo alternativo<input v-model="alt" class="input" required maxlength="500"></label>
-          <button class="btn btn-primary" :disabled="busy">Carica e ridimensiona</button>
+          <label class="fieldset">{{ t('image') }}<input type="file" accept="image/jpeg,image/png,image/webp" class="file-input" required @change="selectFile"></label>
+          <label class="fieldset">{{ t('alt') }}<input v-model="alt" class="input" required maxlength="500"></label>
+          <button class="btn btn-primary" :disabled="busy">{{ t('upload') }}</button>
         </form>
         <div class="grid sm:grid-cols-3 gap-4">
           <figure v-for="img in media" :key="img.id" class="card border border-base-300 p-4">
@@ -311,26 +347,27 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
             <figcaption class="mt-2 break-all">{{ img.alt }}<br><code class="text-xs">{{ img.id }}</code></figcaption>
           </figure>
         </div>
-        <p>Visualizzati gli ultimi 100 media. L'API supporta la paginazione.</p>
+        <p>{{ t('mediaLimit') }}</p>
       </section>
       <section v-if="tab === 'schemas' && actor.role === 'admin'" class="max-w-3xl space-y-4">
-        <h1 class="text-2xl font-bold">Tipi contenuto e schemi</h1>
-        <p>Campi: key, label, kind (text, number, boolean, date, media, relation), required. Le modifiche incompatibili con contenuti esistenti vengono rifiutate.</p>
-        <label class="fieldset">Tipo esistente<select v-model="typeSlug" class="select" @change="loadType"><option v-for="type in types" :key="type.slug" :value="type.slug">{{ type.name }}</option></select></label>
+        <h1 class="text-2xl font-bold">{{ t('schemaTitle') }}</h1>
+        <p>{{ t('schemaHelp') }}</p>
+        <label class="fieldset">{{ t('existingType') }}<select v-model="typeSlug" class="select" @change="loadType"><option v-for="type in types" :key="type.slug" :value="type.slug">{{ type.name }}</option></select></label>
         <form class="space-y-4" @submit.prevent="saveType">
-          <label class="fieldset">Slug tipo (nuovo o esistente)<input v-model="typeSlug" class="input" required></label>
-          <label class="fieldset">Nome<input v-model="typeName" class="input" required></label>
-          <label class="fieldset">Definizioni campi JSON<textarea v-model="typeFields" class="textarea w-full font-mono" rows="12" spellcheck="false"></textarea></label>
+          <label class="fieldset">{{ t('typeSlug') }}<input v-model="typeSlug" class="input" required></label>
+          <label class="fieldset">{{ t('name') }}<input v-model="typeName" class="input" required></label>
+          <label class="fieldset">{{ t('fieldJson') }}<textarea v-model="typeFields" class="textarea w-full font-mono" rows="12" spellcheck="false"></textarea></label>
           <pre class="mockup-code p-4 whitespace-pre-wrap">[{"key":"subtitle","label":"Sottotitolo","kind":"text","required":false}]</pre>
-          <button class="btn btn-primary" :disabled="busy">Salva schema</button>
+          <button class="btn btn-primary" :disabled="busy">{{ t('saveSchema') }}</button>
         </form>
       </section>
       <section v-if="tab === 'navigation' && editorial" class="max-w-3xl">
-        <h1 class="text-2xl font-bold mb-4">Navigazione principale</h1>
+        <h1 class="text-2xl font-bold mb-4">{{ t('mainNavigation') }}</h1>
+        <label class="fieldset">{{ t('contentLanguage') }}<select v-model="navigationLocale" class="select" @change="loadNavigation"><option value="it">Italiano</option><option value="en">English</option></select></label>
         <form class="space-y-4" @submit.prevent="saveNavigation">
-          <label class="fieldset">Collegamenti JSON<textarea v-model="navigationJson" class="textarea w-full font-mono" rows="12"></textarea></label>
+          <label class="fieldset">{{ t('navigationJson') }}<textarea v-model="navigationJson" class="textarea w-full font-mono" rows="12"></textarea></label>
           <pre class="mockup-code p-4 whitespace-pre-wrap">[{"label":"Home","href":"/","children":[]}]</pre>
-          <button class="btn btn-primary" :disabled="busy">Salva navigazione</button>
+          <button class="btn btn-primary" :disabled="busy">{{ t('saveNavigation') }}</button>
         </form>
       </section>
     </template>

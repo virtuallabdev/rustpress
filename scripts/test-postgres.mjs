@@ -49,6 +49,7 @@ try {
       client: postgres.getPgClient('rustpress_test'),
       mediaDir: join(root, 'media'),
       browser: process.argv.includes('--browser'),
+      browserTest: process.argv.includes('--playwright'),
     })
   }
 } finally {

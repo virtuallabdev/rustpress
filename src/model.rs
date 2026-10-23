@@ -49,7 +49,13 @@ pub struct ContentInput {
     pub content_type: String,
     pub slug: String,
     pub title: String,
+    #[serde(default)]
     pub blocks: Vec<Block>,
+    #[serde(default)]
+    pub markdown: Option<String>,
+    #[serde(default = "default_locale")]
+    pub locale: String,
+    pub translation_of: Option<Uuid>,
     #[serde(default)]
     pub fields: Map<String, Value>,
     #[serde(default)]
@@ -68,6 +74,11 @@ pub struct Content {
     pub slug: String,
     pub title: String,
     pub blocks: Value,
+    pub markdown: Option<String>,
+    #[serde(default = "default_locale")]
+    pub locale: String,
+    #[serde(default)]
+    pub translation_group: Uuid,
     pub fields: Value,
     pub extra_fields: Value,
     pub seo: Value,
@@ -92,6 +103,9 @@ impl Content {
             content_type: self.content_type.clone(),
             slug: self.slug.clone(),
             title: self.title.clone(),
+            markdown: self.markdown.clone(),
+            locale: self.locale.clone(),
+            translation_of: None,
             blocks: serde_json::from_value(self.blocks.clone())
                 .map_err(|e| crate::error::Error::Internal(e.to_string()))?,
             fields: serde_json::from_value(self.fields.clone())
@@ -126,6 +140,18 @@ pub fn slug_valid(value: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+pub fn default_locale() -> String {
+    "it".into()
+}
+
+pub fn validate_locale(value: &str) -> Result<()> {
+    if matches!(value, "it" | "en") {
+        Ok(())
+    } else {
+        Err(invalid("Unsupported locale; supported locales: it, en"))
+    }
+}
+
 pub fn safe_url(value: &str) -> bool {
     if value.starts_with('/') {
         return !value.starts_with("//")
@@ -158,6 +184,19 @@ pub fn validate_schema(fields: &[Field]) -> Result<()> {
 }
 
 pub fn validate_content(input: &ContentInput, inherited: &[Field]) -> Result<()> {
+    validate_locale(&input.locale)?;
+    if input.locale == "it" && input.slug == "en" {
+        return Err(invalid(
+            "The Italian slug en is reserved for English routes",
+        ));
+    }
+    if let Some(markdown) = &input.markdown
+        && (markdown.len() > 500_000 || !input.blocks.is_empty())
+    {
+        return Err(invalid(
+            "Markdown is limited to 500000 bytes and cannot coexist with legacy blocks",
+        ));
+    }
     if !slug_valid(&input.slug) || !slug_valid(&input.content_type) {
         return Err(invalid(
             "Slugs must use lowercase ASCII letters, digits and hyphens",
@@ -221,7 +260,7 @@ pub fn validate_content(input: &ContentInput, inherited: &[Field]) -> Result<()>
 }
 
 pub fn validate_navigation(items: &[NavItem], depth: usize) -> Result<()> {
-    if depth > 3 || items.len() > 30 {
+    if (depth >= 3 && !items.is_empty()) || items.len() > 30 {
         return Err(invalid("Navigation exceeds size or depth limit"));
     }
     for item in items {
@@ -236,6 +275,38 @@ pub fn validate_navigation(items: &[NavItem], depth: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn validates_locale_reserved_route_and_utf8_markdown_size() {
+        let mut input: ContentInput = serde_json::from_value(serde_json::json!({
+            "content_type":"page", "slug":"en", "title":"Title", "markdown":"",
+            "status":"draft", "publish_at":"2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert!(validate_content(&input, &[]).is_err());
+        input.locale = "en".into();
+        assert!(validate_content(&input, &[]).is_ok());
+        input.locale = "xx".into();
+        assert!(validate_content(&input, &[]).is_err());
+        input.locale = "en".into();
+        input.markdown = Some("\u{e8}".repeat(250_000));
+        assert!(validate_content(&input, &[]).is_ok());
+        input.markdown.as_mut().unwrap().push('x');
+        assert!(validate_content(&input, &[]).is_err());
+    }
+    #[test]
+    fn navigation_matches_three_rendered_levels() {
+        fn item(children: Vec<NavItem>) -> NavItem {
+            NavItem {
+                label: "Link".into(),
+                href: "/".into(),
+                children,
+            }
+        }
+        assert!(validate_navigation(&[item(vec![item(vec![item(vec![])])])], 0).is_ok());
+        assert!(
+            validate_navigation(&[item(vec![item(vec![item(vec![item(vec![])])])])], 0).is_err()
+        );
+    }
     #[test]
     fn rejects_script_and_protocol_relative_urls() {
         for value in [

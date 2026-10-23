@@ -55,8 +55,46 @@ async fn content_lifecycle_and_authorization_are_transactional() {
         .connect(&url)
         .await
         .unwrap();
+    let mut upgrade = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0001_core.sql"))
+        .execute(&mut *upgrade)
+        .await
+        .unwrap();
+    let legacy_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO contents(id,content_type,slug,title,blocks,status) VALUES ($1,'page','legacy','Legacy',$2,'draft')")
+        .bind(legacy_id).bind(json!([{"kind":"paragraph","text":"Preserved"}])).execute(&mut *upgrade).await.unwrap();
+    let old_snapshot: Value = sqlx::query_scalar("SELECT to_jsonb(c) FROM contents c WHERE id=$1")
+        .bind(legacy_id)
+        .fetch_one(&mut *upgrade)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0002_translations_markdown.sql"))
+        .execute(&mut *upgrade)
+        .await
+        .unwrap();
+    let upgraded: rustpress::model::Content = sqlx::query_as("SELECT * FROM contents WHERE id=$1")
+        .bind(legacy_id)
+        .fetch_one(&mut *upgrade)
+        .await
+        .unwrap();
+    assert_eq!(upgraded.locale, "it");
+    assert_eq!(upgraded.translation_group, legacy_id);
+    assert_eq!(upgraded.markdown, None);
+    assert_eq!(upgraded.blocks[0]["text"], "Preserved");
+    let old_revision: rustpress::model::Content = serde_json::from_value(old_snapshot).unwrap();
+    assert!(
+        old_revision.input().unwrap().markdown.is_none(),
+        "Pre-migration revision must still deserialize"
+    );
+    upgrade.rollback().await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let directory = tempfile::tempdir().unwrap();
+    tokio::fs::create_dir(directory.path().join("public"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(directory.path().join("originals"))
+        .await
+        .unwrap();
     let state = AppState::new(
         Config {
             database_url: url,
@@ -73,6 +111,7 @@ async fn content_lifecycle_and_authorization_are_transactional() {
     let app = router(state);
     let admin = random_token();
     let agent = random_token();
+    let editor = random_token();
     let author = random_token();
     let author_id = Uuid::new_v4();
     sqlx::query(
@@ -86,6 +125,7 @@ async fn content_lifecycle_and_authorization_are_transactional() {
     for (token, role, identity) in [
         (&admin, "admin", None),
         (&agent, "agent", None),
+        (&editor, "editor", None),
         (&author, "author", Some(author_id)),
     ] {
         sqlx::query("INSERT INTO credentials(token_hash,role,label,identity_id,expires_at) VALUES ($1,$2,'test',$3,now()+interval '1 hour')")
@@ -240,6 +280,321 @@ async fn content_lifecycle_and_authorization_are_transactional() {
             "/api/v1/contents",
             Some(&agent),
             Value::Null
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(800, 400)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let boundary = "rustpress-test-boundary";
+    let mut multipart = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"alt\"\r\n\r\nTest image\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"untrusted.png\"\r\n\
+         Content-Type: image/png\r\n\r\n"
+    ).into_bytes();
+    multipart.extend_from_slice(png.get_ref());
+    multipart.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/media")
+        .header(header::AUTHORIZATION, format!("Bearer {admin}"))
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(multipart))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo("127.0.0.1:4321".parse::<SocketAddr>().unwrap()));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let uploaded: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(uploaded["width"], 800);
+    assert_eq!(uploaded["height"], 400);
+    assert_eq!(uploaded["variants"].as_array().unwrap().len(), 3);
+    let asset = uploaded["variants"][0]["url"].as_str().unwrap();
+    let mut request = Request::builder().uri(asset).body(Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo("127.0.0.1:4321".parse::<SocketAddr>().unwrap()));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let decoded = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (320, 160));
+    let original = format!(
+        "/media/../originals/{}.bin",
+        uploaded["id"].as_str().unwrap()
+    );
+    assert_ne!(
+        call(&app, Method::GET, &original, None, Value::Null)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM media")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 1);
+    let mut localized = json!({
+        "content_type":"post", "slug":"markdown", "title":"Italiano", "locale":"it",
+        "markdown":"## Titolo\n\n**Testo** e [link](javascript:alert%281%29)\n\n<script>alert(1)</script>",
+        "fields":{"local-note":"Nota"},
+        "extra_fields":[{"key":"local-note","label":"Note","kind":"text","required":false}],
+        "status":"published", "publish_at":"2026-01-01T00:00:00Z"
+    });
+    let (status, italian) = call(
+        &app,
+        Method::POST,
+        "/api/v1/contents",
+        Some(&admin),
+        localized.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{italian}");
+    let italian_id = italian["id"].as_str().unwrap();
+    let (_, public_it) = call(
+        &app,
+        Method::GET,
+        "/api/v1/public/contents/markdown",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert!(
+        public_it["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<strong>Testo</strong>")
+    );
+    assert!(!public_it["body_html"].as_str().unwrap().contains("<script"));
+    assert!(
+        !public_it["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("href=\"javascript:")
+    );
+    let stored_markdown: String = sqlx::query_scalar("SELECT markdown FROM contents WHERE id=$1")
+        .bind(Uuid::parse_str(italian_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored_markdown, localized["markdown"].as_str().unwrap());
+    localized["translation_of"] = json!(italian_id);
+    localized["locale"] = json!("en");
+    localized["title"] = json!("English");
+    localized["markdown"] = json!("## Heading\n\n**English** translation");
+    localized["status"] = json!("draft");
+    assert_eq!(
+        call(
+            &app,
+            Method::POST,
+            "/api/v1/contents",
+            Some(&author),
+            localized.clone()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, english) = call(
+        &app,
+        Method::POST,
+        "/api/v1/contents",
+        Some(&editor),
+        localized.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{english}");
+    assert_eq!(english["translation_group"], italian["translation_group"]);
+    assert_eq!(
+        call(
+            &app,
+            Method::GET,
+            "/api/v1/public/contents/markdown?locale=en",
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, public_it) = call(
+        &app,
+        Method::GET,
+        "/api/v1/public/contents/markdown",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        public_it["translations"].as_array().unwrap().len(),
+        1,
+        "Do not disclose draft translations"
+    );
+    localized["slug"] = json!("another-slug");
+    assert_eq!(
+        call(
+            &app,
+            Method::POST,
+            "/api/v1/contents",
+            Some(&admin),
+            localized.clone()
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+        "Only one translation per group/locale"
+    );
+    localized["slug"] = json!("markdown");
+    localized.as_object_mut().unwrap().remove("translation_of");
+    localized["version"] = json!(1);
+    localized["status"] = json!("published");
+    let english_path = format!("/api/v1/contents/{}", english["id"].as_str().unwrap());
+    assert_eq!(
+        call(
+            &app,
+            Method::PUT,
+            &english_path,
+            Some(&admin),
+            localized.clone()
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, public_it) = call(
+        &app,
+        Method::GET,
+        "/api/v1/public/contents/markdown",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(public_it["translations"].as_array().unwrap().len(), 2);
+    let (_, en) = call(
+        &app,
+        Method::GET,
+        "/api/v1/public/contents/markdown?locale=en",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(en["title"], "English");
+    let (_, en_list) = call(
+        &app,
+        Method::GET,
+        "/api/v1/public/contents?locale=en&q=translation",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        en_list["items"].as_array().unwrap().len(),
+        1,
+        "Search must include Markdown text and respect locale"
+    );
+    assert_eq!(
+        call(
+            &app,
+            Method::GET,
+            "/api/v1/public/contents?locale=xx",
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    localized["version"] = json!(2);
+    localized["locale"] = json!("it");
+    assert_eq!(
+        call(
+            &app,
+            Method::PUT,
+            &english_path,
+            Some(&admin),
+            localized.clone()
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    localized["locale"] = json!("en");
+    localized["blocks"] = json!([{"kind":"paragraph","text":"ambiguous"}]);
+    assert_eq!(
+        call(&app, Method::PUT, &english_path, Some(&admin), localized)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            Method::PUT,
+            "/api/v1/navigation/main?locale=en",
+            Some(&admin),
+            json!([{"label":"English menu","href":"/en","children":[]}])
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, en_menu) = call(
+        &app,
+        Method::GET,
+        "/api/v1/public/navigation/main?locale=en",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(en_menu[0]["label"], "English menu");
+    let (_, it_menu) = call(
+        &app,
+        Method::GET,
+        "/api/v1/public/navigation/main",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(it_menu, json!([]));
+    let (_, preview) = call(
+        &app,
+        Method::POST,
+        "/api/v1/markdown/preview",
+        Some(&admin),
+        json!({"markdown":"**Safe** <img src=x onerror=alert(1)>"}),
+    )
+    .await;
+    assert!(
+        preview["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<strong>Safe</strong>")
+    );
+    assert!(
+        !preview["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<img src=x")
+    );
+    assert_eq!(
+        call(
+            &app,
+            Method::POST,
+            "/api/v1/markdown/preview",
+            None,
+            json!({"markdown":"private"})
         )
         .await
         .0,

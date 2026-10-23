@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod markdown;
 pub mod media;
 pub mod model;
 
@@ -122,6 +123,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/auth/me", get(auth::me))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/types", get(api::types))
+        .route("/api/v1/markdown/preview", post(markdown::preview))
         .route("/api/v1/types/{slug}", put(api::save_type))
         .route("/api/v1/contents", get(api::list).post(api::create))
         .route("/api/v1/contents/{id}", get(api::get).put(api::update))

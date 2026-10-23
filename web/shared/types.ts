@@ -10,6 +10,9 @@ export interface ContentInput {
   slug: string
   title: string
   blocks: Block[]
+  markdown: string | null
+  locale: 'it' | 'en'
+  translation_of?: string | null
   fields: Record<string, string | number | boolean | null>
   extra_fields: Field[]
   seo: Seo
@@ -22,8 +25,12 @@ export interface Content extends ContentInput {
   author_id: string | null
   created_at: string
   updated_at: string
+  translation_group: string
 }
-export type PublicContent = Pick<Content, 'id' | 'content_type' | 'slug' | 'title' | 'blocks' | 'fields' | 'seo' | 'publish_at' | 'updated_at'>
+export type PublicContent = Pick<Content, 'id' | 'content_type' | 'slug' | 'title' | 'blocks' | 'markdown' | 'locale' | 'fields' | 'seo' | 'publish_at' | 'updated_at'> & {
+  body_html: string | null
+  translations?: { locale: 'it' | 'en'; slug: string; noindex: boolean }[]
+}
 export interface ContentType { slug: string; name: string; fields: Field[] }
 export interface Actor { identity_id: string | null; role: 'admin' | 'editor' | 'author' | 'agent'; label: string }
 export interface NavItem { label: string; href: string; children: NavItem[] }

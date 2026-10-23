@@ -18,7 +18,7 @@ async function freePort() {
   return address.port
 }
 
-export async function webSmoke({ databaseUrl, client, mediaDir, browser }) {
+export async function webSmoke({ databaseUrl, client, mediaDir, browser, browserTest }) {
   const [apiPort, adminPort, themePort] = await Promise.all([freePort(), freePort(), freePort()])
   const api = `http://127.0.0.1:${apiPort}`
   const admin = `http://localhost:${adminPort}`
@@ -74,7 +74,9 @@ export async function webSmoke({ databaseUrl, client, mediaDir, browser }) {
       method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: `rp_session=${token}`, Origin: admin },
       body: JSON.stringify(body),
     })
-    assert.equal(saved.status, 201, await saved.text())
+    const savedText = await saved.text()
+    assert.equal(saved.status, 201, savedText)
+    const original = JSON.parse(savedText)
     const pageResponse = await fetch(`${theme}/web-smoke`)
     assert.equal(pageResponse.status, 200)
     const html = await pageResponse.text()
@@ -93,7 +95,32 @@ export async function webSmoke({ databaseUrl, client, mediaDir, browser }) {
     const loginPage = await fetch(admin)
     assert.equal(loginPage.status, 200)
     assert.equal(loginPage.headers.get('cache-control'), 'no-store')
+    const translated = await fetch(`${admin}/api/v1/contents`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: `rp_session=${token}`, Origin: admin },
+      body: JSON.stringify({
+        ...body, blocks: [], locale: 'en', translation_of: original.id, slug: 'translated-smoke',
+        title: 'English article', markdown: '## English heading\n\n**Bold** text\n\n<script>alert(1)</script>\n\n[bad](javascript:alert%281%29)',
+      }),
+    })
+    assert.equal(translated.status, 201, await translated.text())
+    const english = await fetch(`${theme}/en/translated-smoke`)
+    assert.equal(english.status, 200)
+    const englishHtml = await english.text()
+    assert.ok(/<html[^>]+lang="en"/.test(englishHtml), 'HTML language must follow route')
+    assert.ok(englishHtml.includes('<strong>Bold</strong>'), 'Markdown must render on the server')
+    assert.ok(!englishHtml.includes('<script>alert(1)</script>'), 'Raw HTML must never execute')
+    assert.ok(!englishHtml.includes('href="javascript:'), 'Unsafe Markdown URLs must be removed')
+    assert.ok(englishHtml.includes('hreflang="it"') && englishHtml.includes('hreflang="en"'), 'Published translation alternates are required')
+    assert.ok(englishHtml.includes(`href="${theme}/en/translated-smoke"`), 'English canonical must use its translated slug')
+    assert.equal((await fetch(`${theme}/en/web-smoke`)).status, 404, 'A missing translation must not silently fall back')
+    assert.ok((await (await fetch(`${theme}/en`)).text()).includes('Articles and pages'), 'Public interface must be translated')
+    const adminEnglish = await fetch(admin, { headers: { Cookie: 'rp_language=en' } })
+    assert.ok((await adminEnglish.text()).includes('lang="en"'), 'Admin locale preference must survive SSR')
     console.log('Web smoke passed: real Axum + PostgreSQL + production Nuxt SSR, session proxy, CSRF, XSS escaping, sitemap and public API isolation.')
+    if (browserTest) {
+      const { editorBrowserTest } = await import('./editor-browser.mjs')
+      await editorBrowserTest({ admin, theme, token })
+    }
     if (browser) {
       console.log(`Browser preview (120 seconds): admin=${admin} theme=${theme}/web-smoke`)
       await delay(120_000)

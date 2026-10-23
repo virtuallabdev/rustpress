@@ -19,9 +19,13 @@ pub struct PageQuery {
     pub offset: Option<i64>,
     pub q: Option<String>,
     pub content_type: Option<String>,
+    pub locale: Option<String>,
 }
 impl PageQuery {
     fn validate(&self) -> Result<(i64, i64, &str, &str)> {
+        if let Some(locale) = &self.locale {
+            validate_locale(locale)?;
+        }
         let limit = self.limit.unwrap_or(20);
         let offset = self.offset.unwrap_or(0);
         let q = self.q.as_deref().unwrap_or("");
@@ -33,8 +37,15 @@ impl PageQuery {
         {
             return Err(invalid("Invalid pagination or search query"));
         }
+
         Ok((limit, offset, q, kind))
     }
+}
+
+#[derive(Deserialize)]
+pub struct LocaleQuery {
+    #[serde(default = "default_locale")]
+    pub locale: String,
 }
 
 pub async fn types(State(state): State<AppState>, _actor: Actor) -> Result<Json<Vec<ContentType>>> {
@@ -92,9 +103,10 @@ pub async fn list(
     let (limit, offset, q, kind) = query.validate()?;
     let rows: Vec<Content> = sqlx::query_as(
         "SELECT * FROM contents WHERE ($1='' OR content_type=$1)
-         AND ($2='' OR to_tsvector('simple', title || ' ' || blocks::text) @@ plainto_tsquery('simple',$2))
-         AND ($3 <> 'author' OR author_id=$4) ORDER BY updated_at DESC,id LIMIT $5 OFFSET $6")
-        .bind(kind).bind(q).bind(&actor.role).bind(actor.identity_id).bind(limit).bind(offset).fetch_all(&state.pool).await?;
+         AND ($2='' OR to_tsvector('simple', title || ' ' || COALESCE(markdown,blocks::text)) @@ plainto_tsquery('simple',$2))
+         AND ($3 <> 'author' OR author_id=$4) AND ($7='' OR locale=$7) ORDER BY updated_at DESC,id LIMIT $5 OFFSET $6")
+        .bind(kind).bind(q).bind(&actor.role).bind(actor.identity_id).bind(limit).bind(offset)
+        .bind(query.locale.as_deref().unwrap_or("")).fetch_all(&state.pool).await?;
     Ok(Json(
         json!({"items": rows, "limit": limit, "offset": offset}),
     ))
@@ -211,6 +223,11 @@ async fn save(
         if previous.content_type != input.content_type {
             return Err(invalid("Content type cannot change"));
         }
+        if previous.locale != input.locale || input.translation_of.is_some() {
+            return Err(invalid(
+                "Locale and translation group cannot change after creation",
+            ));
+        }
         if previous.status != "draft" {
             actor.editorial()?;
         }
@@ -220,9 +237,31 @@ async fn save(
     if input.status != "draft" {
         actor.editorial()?;
     }
+    let translation_source = if previous.is_none() {
+        if let Some(source) = input.translation_of {
+            let source =
+                sqlx::query_as::<_, Content>("SELECT * FROM contents WHERE id=$1 FOR SHARE")
+                    .bind(source)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .ok_or(Error::NotFound)?;
+            actor.can_own(source.author_id)?;
+            if source.content_type != input.content_type || source.locale == input.locale {
+                return Err(invalid(
+                    "Translation must have the same content type and a different locale",
+                ));
+            }
+            Some(source)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if actor.role != "admin" {
         let before = previous
             .as_ref()
+            .or(translation_source.as_ref())
             .map(|c| c.extra_fields.clone())
             .unwrap_or(json!([]));
         if before != json!(input.extra_fields) {
@@ -231,14 +270,26 @@ async fn save(
     }
     validate_refs(&mut tx, &input, &schema).await?;
     let id = id.unwrap_or_else(Uuid::new_v4);
+    let group = if let Some(previous) = &previous {
+        previous.translation_group
+    } else if let Some(source) = &translation_source {
+        source.translation_group
+    } else {
+        sqlx::query("INSERT INTO translation_groups(id) VALUES ($1)")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        id
+    };
     let content = sqlx::query_as::<_, Content>(
-        "INSERT INTO contents(id,content_type,slug,title,blocks,fields,extra_fields,seo,status,publish_at,author_id)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        "INSERT INTO contents(id,content_type,slug,title,blocks,fields,extra_fields,seo,status,publish_at,author_id,locale,translation_group,markdown)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          ON CONFLICT(id) DO UPDATE SET slug=$3,title=$4,blocks=$5,fields=$6,extra_fields=$7,seo=$8,status=$9,
-         publish_at=$10,version=contents.version+1,updated_at=now() RETURNING *")
+         publish_at=$10,markdown=$14,version=contents.version+1,updated_at=now() RETURNING *")
         .bind(id).bind(input.content_type).bind(input.slug).bind(input.title)
         .bind(json!(input.blocks)).bind(json!(input.fields)).bind(json!(input.extra_fields)).bind(json!(input.seo))
-        .bind(input.status).bind(input.publish_at).bind(actor.identity_id).fetch_one(&mut *tx).await?;
+        .bind(input.status).bind(input.publish_at).bind(actor.identity_id).bind(input.locale).bind(group)
+        .bind(input.markdown).fetch_one(&mut *tx).await?;
     sqlx::query("INSERT INTO revisions(content_id,version,snapshot) VALUES ($1,$2,$3)")
         .bind(id)
         .bind(content.version)
@@ -302,10 +353,12 @@ pub async fn revisions(
 }
 
 fn public_content(content: Content) -> Value {
+    let body_html = content.markdown.as_deref().map(crate::markdown::render);
     json!({
         "id":content.id, "content_type":content.content_type, "slug":content.slug, "title":content.title,
         "blocks":content.blocks, "fields":content.fields, "seo":content.seo,
-        "publish_at":content.publish_at, "updated_at":content.updated_at
+        "publish_at":content.publish_at, "updated_at":content.updated_at,
+        "markdown":content.markdown, "body_html":body_html, "locale":content.locale
     })
 }
 
@@ -316,9 +369,9 @@ pub async fn public_list(
     let (limit, offset, q, kind) = query.validate()?;
     let rows: Vec<Content> = sqlx::query_as(
         "SELECT * FROM contents WHERE status='published' AND publish_at<=now() AND ($1='' OR content_type=$1)
-         AND ($2='' OR to_tsvector('simple',title || ' ' || blocks::text) @@ plainto_tsquery('simple',$2))
-         ORDER BY publish_at DESC,id LIMIT $3 OFFSET $4")
-        .bind(kind).bind(q).bind(limit).bind(offset).fetch_all(&state.pool).await?;
+         AND ($2='' OR to_tsvector('simple',title || ' ' || COALESCE(markdown,blocks::text)) @@ plainto_tsquery('simple',$2))
+         AND locale=$5 ORDER BY publish_at DESC,id LIMIT $3 OFFSET $4")
+        .bind(kind).bind(q).bind(limit).bind(offset).bind(query.locale.as_deref().unwrap_or("it")).fetch_all(&state.pool).await?;
     Ok(Json(
         json!({"items":rows.into_iter().map(public_content).collect::<Vec<_>>(),"limit":limit,"offset":offset}),
     ))
@@ -326,26 +379,39 @@ pub async fn public_list(
 pub async fn public_get(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    Query(query): Query<LocaleQuery>,
 ) -> Result<Json<Value>> {
+    validate_locale(&query.locale)?;
     let content = sqlx::query_as::<_, Content>(
-        "SELECT * FROM contents WHERE slug=$1 AND status='published' AND publish_at<=now()",
+        "SELECT * FROM contents WHERE slug=$1 AND locale=$2 AND status='published' AND publish_at<=now()",
     )
     .bind(slug)
+    .bind(query.locale)
     .fetch_optional(&state.pool)
     .await?
     .ok_or(Error::NotFound)?;
-    Ok(Json(public_content(content)))
+    let translations: Vec<Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object('locale',locale,'slug',slug,'noindex',COALESCE((seo->>'noindex')::boolean,false))
+         FROM contents WHERE translation_group=$1 AND status='published' AND publish_at<=now() ORDER BY locale")
+        .bind(content.translation_group).fetch_all(&state.pool).await?;
+    let mut result = public_content(content);
+    result["translations"] = json!(translations);
+    Ok(Json(result))
 }
 
 pub async fn navigation(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(query): Query<LocaleQuery>,
 ) -> Result<Json<Vec<NavItem>>> {
-    let items: Value = sqlx::query_scalar("SELECT items FROM navigation WHERE name=$1")
-        .bind(name)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or(Error::NotFound)?;
+    validate_locale(&query.locale)?;
+    let items: Value =
+        sqlx::query_scalar("SELECT items FROM navigation WHERE name=$1 AND locale=$2")
+            .bind(name)
+            .bind(query.locale)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(Error::NotFound)?;
     Ok(Json(
         serde_json::from_value(items).map_err(|e| Error::Internal(e.to_string()))?,
     ))
@@ -354,40 +420,50 @@ pub async fn save_navigation(
     State(state): State<AppState>,
     actor: Actor,
     Path(name): Path<String>,
+    Query(query): Query<LocaleQuery>,
     Json(items): Json<Vec<NavItem>>,
 ) -> Result<StatusCode> {
     actor.editorial()?;
+    validate_locale(&query.locale)?;
     if !slug_valid(&name) {
         return Err(invalid("Invalid navigation name"));
     }
     validate_navigation(&items, 0)?;
     let mut tx = state.pool.begin().await?;
     sqlx::query(
-        "INSERT INTO navigation(name,items) VALUES($1,$2) ON CONFLICT(name) DO UPDATE SET items=$2",
+        "INSERT INTO navigation(name,items,locale) VALUES($1,$2,$3) ON CONFLICT(name,locale) DO UPDATE SET items=$2",
     )
     .bind(&name)
     .bind(json!(items))
+    .bind(&query.locale)
     .execute(&mut *tx)
     .await?;
-    audit(&mut tx, &actor, "navigation.save", &name).await?;
+    audit(
+        &mut tx,
+        &actor,
+        "navigation.save",
+        &format!("{}:{name}", query.locale),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn sitemap(State(state): State<AppState>) -> Result<axum::response::Response> {
     use axum::{http::header, response::IntoResponse};
-    let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT slug,updated_at FROM contents WHERE status='published' AND publish_at<=now()
-         AND COALESCE((seo->>'noindex')::boolean,false)=false ORDER BY slug LIMIT 50000",
+    let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT slug,locale,updated_at FROM contents WHERE status='published' AND publish_at<=now()
+         AND COALESCE((seo->>'noindex')::boolean,false)=false ORDER BY locale,slug LIMIT 50000",
     )
     .fetch_all(&state.pool)
     .await?;
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">",
     );
-    for (slug, updated) in rows {
+    for (slug, locale, updated) in rows {
+        let prefix = if locale == "it" { "" } else { "/en" };
         xml.push_str(&format!(
-            "<url><loc>{}/{slug}</loc><lastmod>{}</lastmod></url>",
+            "<url><loc>{}{prefix}/{slug}</loc><lastmod>{}</lastmod></url>",
             state.config.site_origin,
             updated.to_rfc3339()
         ));

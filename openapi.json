@@ -19,7 +19,8 @@
       "limit": {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
       "offset": {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 100000, "default": 0}},
       "q": {"name": "q", "in": "query", "schema": {"type": "string", "maxLength": 200}},
-      "type": {"name": "content_type", "in": "query", "schema": {"type": "string", "maxLength": 120}}
+      "type": {"name": "content_type", "in": "query", "schema": {"type": "string", "maxLength": 120}},
+      "locale": {"name": "locale", "in": "query", "description": "Public reads and menus default to it. Editorial lists without locale include all languages. No content fallback.", "schema": {"type": "string", "enum": ["it","en"]}}
     },
     "schemas": {
       "Field": {
@@ -49,11 +50,14 @@
       },
       "ContentInput": {
         "type": "object", "additionalProperties": false,
-        "required": ["content_type", "slug", "title", "blocks", "status", "publish_at"],
+        "required": ["content_type", "slug", "title", "status", "publish_at"],
         "properties": {
           "content_type": {"type": "string"},
           "slug": {"type": "string", "maxLength": 120, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
           "title": {"type": "string", "maxLength": 300},
+          "locale": {"type": "string", "enum": ["it","en"], "default": "it", "description": "Immutable after creation"},
+          "translation_of": {"type": ["string","null"], "format": "uuid", "description": "POST only: existing source document ID; same type, different locale, requires read/ownership permission"},
+          "markdown": {"type": ["string","null"], "description": "Preferred body format; maximum 500000 UTF-8 bytes. When non-null, blocks must be empty. Raw HTML is escaped on render."},
           "blocks": {"type": "array", "maxItems": 500, "items": {"$ref": "#/components/schemas/Block"}},
           "fields": {"type": "object", "description": "Values must conform to the content type fields plus extra_fields"},
           "extra_fields": {"type": "array", "items": {"$ref": "#/components/schemas/Field"}, "description": "Only admins may change per-document schema"},
@@ -64,13 +68,27 @@
         }
       },
       "Content": {
-        "allOf": [
-          {"$ref": "#/components/schemas/ContentInput"},
-          {"type": "object", "properties": {
-            "id": {"type": "string", "format": "uuid"}, "author_id": {"type": ["string", "null"], "format": "uuid"},
-            "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}
-          }}
-        ]
+        "type": "object",
+        "required": ["id", "content_type", "slug", "title", "blocks", "markdown", "locale", "translation_group", "fields", "extra_fields", "seo", "status", "publish_at", "version", "author_id", "created_at", "updated_at"],
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "content_type": {"type": "string"},
+          "slug": {"type": "string"},
+          "title": {"type": "string"},
+          "locale": {"type": "string", "enum": ["it","en"]},
+          "translation_group": {"type": "string", "format": "uuid"},
+          "markdown": {"type": ["string","null"]},
+          "blocks": {"type": "array", "items": {"$ref": "#/components/schemas/Block"}},
+          "fields": {"type": "object"},
+          "extra_fields": {"type": "array", "items": {"$ref": "#/components/schemas/Field"}},
+          "seo": {"$ref": "#/components/schemas/Seo"},
+          "status": {"enum": ["draft", "published", "archived"]},
+          "publish_at": {"type": "string", "format": "date-time"},
+          "version": {"type": "integer"},
+          "author_id": {"type": ["string", "null"], "format": "uuid"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
       },
       "Navigation": {
         "type": "array", "maxItems": 30,
@@ -99,6 +117,11 @@
     }
   },
   "paths": {
+    "/api/v1/markdown/preview": {
+      "post": {"operationId":"previewMarkdown","description":"Authenticated safe Markdown renderer, identical to public rendering. Raw HTML disabled; images restricted to generated local WebP variants.",
+        "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"required":["markdown"],"properties":{"markdown":{"type":"string","description":"Maximum 500000 UTF-8 bytes"}}}}}},
+        "responses":{"200":{"description":"Sanitized HTML","content":{"application/json":{"schema":{"type":"object","required":["body_html"],"properties":{"body_html":{"type":"string"}}}}}},"400":{"$ref":"#/components/responses/invalid"},"401":{"$ref":"#/components/responses/unauthorized"}}}
+    },
     "/health/live": {"get": {"operationId": "liveness", "security": [], "responses": {"200": {"$ref": "#/components/responses/ok"}}}},
     "/health/ready": {"get": {"operationId": "readiness", "security": [], "responses": {"200": {"$ref": "#/components/responses/ok"}, "500": {"description": "Database unavailable"}}}},
     "/api/v1/auth/providers": {"get": {"operationId": "authProviders", "security": [], "responses": {"200": {"description": "Configured provider names", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "string"}}}}}}}},
@@ -112,6 +135,7 @@
         "responses": {"200": {"$ref": "#/components/responses/ok"}, "400": {"$ref": "#/components/responses/invalid"}, "403": {"$ref": "#/components/responses/forbidden"}}}
     },
     "/api/v1/contents": {
+      "parameters": [{"$ref": "#/components/parameters/locale"}],
       "get": {"operationId": "listEditorialContents", "parameters": [{"$ref": "#/components/parameters/limit"}, {"$ref": "#/components/parameters/offset"}, {"$ref": "#/components/parameters/q"}, {"$ref": "#/components/parameters/type"}], "responses": {"200": {"description": "{items: Content[], limit: integer, offset: integer}; authors see only own documents"}}},
       "post": {"operationId": "createContent", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContentInput"}}}}, "responses": {"201": {"description": "Created Content"}, "400": {"$ref": "#/components/responses/invalid"}, "403": {"$ref": "#/components/responses/forbidden"}, "409": {"$ref": "#/components/responses/conflict"}}}
     },
@@ -127,7 +151,7 @@
       "get": {"operationId": "listRevisions", "parameters": [{"$ref": "#/components/parameters/limit"}, {"$ref": "#/components/parameters/offset"}], "responses": {"200": {"description": "{items:[{id,version,snapshot,created_at}],limit,offset}; restore by PUT with current version"}}}
     },
     "/api/v1/navigation/{name}": {
-      "parameters": [{"$ref": "#/components/parameters/name"}],
+      "parameters": [{"$ref": "#/components/parameters/name"},{"$ref": "#/components/parameters/locale"}],
       "put": {"operationId": "saveNavigation", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Navigation"}}}}, "responses": {"204": {"description": "Saved; editor/admin only"}}}
     },
     "/api/v1/media": {
@@ -137,14 +161,15 @@
         "responses": {"200": {"description": "{id,alt,width,height,variants:[{width,url}]}"}, "400": {"$ref": "#/components/responses/invalid"}, "413": {"description": "Upload too large"}, "429": {"description": "Image workers busy"}}}
     },
     "/api/v1/public/contents": {
-      "get": {"operationId": "listPublishedContents", "security": [], "parameters": [{"$ref": "#/components/parameters/limit"}, {"$ref": "#/components/parameters/offset"}, {"$ref": "#/components/parameters/q"}, {"$ref": "#/components/parameters/type"}], "responses": {"200": {"description": "{items:[{id,content_type,slug,title,blocks,fields,seo,publish_at,updated_at}],limit,offset}. Only published and due content."}}}
+      "parameters": [{"$ref": "#/components/parameters/locale"}],
+      "get": {"operationId": "listPublishedContents", "security": [], "parameters": [{"$ref": "#/components/parameters/limit"}, {"$ref": "#/components/parameters/offset"}, {"$ref": "#/components/parameters/q"}, {"$ref": "#/components/parameters/type"}], "responses": {"200": {"description": "{items:[{id,content_type,slug,title,blocks,markdown,body_html,locale,fields,seo,publish_at,updated_at}],limit,offset}. Only published and due content in the requested locale. body_html is sanitized HTML for Markdown or null for legacy blocks."}}}
     },
     "/api/v1/public/contents/{slug}": {
-      "parameters": [{"$ref": "#/components/parameters/slug"}],
-      "get": {"operationId": "getPublishedContent", "security": [], "responses": {"200": {"description": "Public content"}, "404": {"$ref": "#/components/responses/missing"}}}
+      "parameters": [{"$ref": "#/components/parameters/slug"},{"$ref": "#/components/parameters/locale"}],
+      "get": {"operationId": "getPublishedContent", "security": [], "responses": {"200": {"description": "Public content with markdown, sanitized body_html (or null for legacy blocks), locale and translations:[{locale,slug,noindex}]. Only published/due translations are disclosed."}, "404": {"$ref": "#/components/responses/missing"}}}
     },
     "/api/v1/public/navigation/{name}": {
-      "parameters": [{"$ref": "#/components/parameters/name"}],
+      "parameters": [{"$ref": "#/components/parameters/name"},{"$ref": "#/components/parameters/locale"}],
       "get": {"operationId": "getNavigation", "security": [], "responses": {"200": {"description": "Navigation array"}}}
     },
     "/api/v1/public/media/{id}": {

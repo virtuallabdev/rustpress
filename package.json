@@ -9,11 +9,13 @@
     "dev:admin": "npm run dev --workspace=@rustpress/admin",
     "dev:theme": "npm run dev --workspace=@rustpress/theme",
     "test:integration": "node scripts/test-postgres.mjs",
-    "test:e2e": "node scripts/test-postgres.mjs --web"
+    "test:e2e": "node scripts/test-postgres.mjs --web",
+    "test:browser": "node scripts/test-postgres.mjs --web --playwright"
   },
   "devDependencies": {
     "embedded-postgres": "18.4.0-beta.17",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "@playwright/test": "1.64.1"
   },
   "overrides": {
     "typescript": "$typescript"

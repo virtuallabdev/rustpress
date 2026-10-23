@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import type { PublicContent } from '../../../shared/types'
 const route = useRoute()
-const { data, error } = await useFetch<PublicContent>(`/api/v1/public/contents/${encodeURIComponent(String(route.params.slug))}`)
+const { t, locale } = useI18n()
+const localePath = useLocalePath()
+const { data, error } = await useFetch<PublicContent>(`/api/v1/public/contents/${encodeURIComponent(String(route.params.slug))}`, { query: { locale } })
 if (error.value || !data.value) {
-  throw createError({ statusCode: error.value?.statusCode === 404 ? 404 : 503, statusMessage: error.value?.statusCode === 404 ? 'Contenuto non trovato' : 'Servizio non disponibile' })
+  throw createError({ statusCode: error.value?.statusCode === 404 ? 404 : 503, statusMessage: error.value?.statusCode === 404 ? t('notFound') : t('unavailable') })
 }
 const content = data.value
 const config = useRuntimeConfig()
-const canonical = new URL(content.seo.canonical || `/${content.slug}`, config.public.siteOrigin).href
+const canonical = new URL(content.seo.canonical || localePath(`/${content.slug}`), config.public.siteOrigin).href
+const alternates = (content.translations || []).filter(item => !item.noindex).map(item => ({
+  rel: 'alternate' as const, hreflang: item.locale,
+  href: new URL(localePath(`/${item.slug}`, item.locale), config.public.siteOrigin).href,
+}))
 useSeoMeta({
   title: content.title, description: content.seo.description,
   ogTitle: content.title, ogDescription: content.seo.description,
@@ -15,13 +21,13 @@ useSeoMeta({
   robots: content.seo.noindex ? 'noindex,follow' : 'index,follow',
 })
 useHead({
-  link: [{ rel: 'canonical', href: canonical }],
+  link: [{ rel: 'canonical', href: canonical }, ...alternates],
   script: [{
     type: 'application/ld+json',
     textContent: JSON.stringify({
       '@context': 'https://schema.org', '@type': content.content_type === 'post' ? 'Article' : 'WebPage',
       headline: content.title, description: content.seo.description, url: canonical,
-      datePublished: content.publish_at, dateModified: content.updated_at,
+      datePublished: content.publish_at, dateModified: content.updated_at, inLanguage: content.locale,
     }).replace(/</g, '\\u003c'),
   }],
 })
@@ -33,7 +39,12 @@ useHead({
     <article>
       <h1 class="text-4xl font-bold my-8">{{ content.title }}</h1>
       <p v-if="content.seo.description" class="text-xl opacity-80 mb-8">{{ content.seo.description }}</p>
-      <template v-for="(block, index) in content.blocks" :key="index">
+      <nav :aria-label="t('translations')" class="flex gap-3 mb-6">
+        <NuxtLink v-for="item in content.translations" :key="item.locale" :to="localePath(`/${item.slug}`, item.locale)" :lang="item.locale">{{ item.locale === 'it' ? 'Italiano' : 'English' }}</NuxtLink>
+      </nav>
+      <!-- Only server-rendered, allowlisted Markdown HTML is inserted here. -->
+      <div v-if="content.body_html !== null" class="markdown-body" v-html="content.body_html" />
+      <template v-for="(block, index) in content.body_html === null ? content.blocks : []" :key="index">
         <p v-if="block.kind === 'paragraph'" class="my-4 leading-8 whitespace-pre-wrap">{{ block.text }}</p>
         <component :is="`h${block.level}`" v-else-if="block.kind === 'heading'" class="text-2xl font-bold mt-8 mb-4">{{ block.text }}</component>
         <ContentImage v-else-if="block.kind === 'image'" :id="block.media_id" :alt="block.alt" />
