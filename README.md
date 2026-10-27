@@ -90,13 +90,19 @@ presumere che le variabili PowerShell siano inoltrate automaticamente.
 Compose avvia insieme PostgreSQL, API Axum, amministrazione Nuxt e tema pubblico;
 l'API attende PostgreSQL sano e applica le migrazioni automaticamente.
 
+**Nomi fissi, non casuali:** usare sempre il progetto Compose `rustpress`
+(`-p rustpress`, gia impostato anche da `name: rustpress` in
+[compose.yaml](compose.yaml)). Container, rete e volumi si chiamano quindi
+`rustpress-*` e le immagini costruite sono `rustpress-api:local`,
+`rustpress-admin:local` e `rustpress-theme:local`.
+
 Da PowerShell con Docker disponibile direttamente, assegnare una password
 generata, URL-safe, nella sessione:
 
 ```powershell
 $env:POSTGRES_PASSWORD = '<GENERATED_URL_SAFE_PASSWORD>'
-docker compose up --build -d --wait
-docker compose ps
+docker compose -p rustpress up --build -d --wait
+docker compose -p rustpress ps
 ```
 
 Su questa macchina, con Docker in **WSL**, usare invece:
@@ -104,8 +110,8 @@ Su questa macchina, con Docker in **WSL**, usare invece:
 ```powershell
 $env:POSTGRES_PASSWORD = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
 $env:WSLENV = (@($env:WSLENV, 'POSTGRES_PASSWORD') | Where-Object { $_ }) -join ':'
-wsl --exec docker compose up --build -d --wait
-wsl --exec docker compose ps
+wsl --exec docker compose -p rustpress up --build -d --wait
+wsl --exec docker compose -p rustpress ps
 ```
 
 Conservare la stessa password per i successivi avvii: cambiarla nella variabile
@@ -119,8 +125,15 @@ Gli healthcheck dei frontend verificano anche il proxy verso Axum e, per il
 tema, una lettura dal database. Per log e arresto senza perdere i dati:
 
 ```powershell
-wsl --exec docker compose logs --tail 100 api db admin theme
-wsl --exec docker compose down
+wsl --exec docker compose -p rustpress logs --tail 100 api db admin theme
+wsl --exec docker compose -p rustpress down
+```
+
+Per costruire a mano la sola immagine API, assegnare esplicitamente il nome
+`rustpress`, altrimenti Docker crea un'immagine senza nome (`<none>`):
+
+```powershell
+wsl --exec docker build -t rustpress:local .
 ```
 
 Per accedere al back office occorre configurare almeno un provider OAuth e
@@ -145,7 +158,7 @@ $env:RUSTPRESS_API_IMAGE = 'rustpress-api:verify'
 $env:RUSTPRESS_ADMIN_IMAGE = 'rustpress-admin:verify'
 $env:RUSTPRESS_THEME_IMAGE = 'rustpress-theme:verify'
 $env:WSLENV = (@($env:WSLENV, 'RUSTPRESS_API_IMAGE', 'RUSTPRESS_ADMIN_IMAGE', 'RUSTPRESS_THEME_IMAGE') | Where-Object { $_ }) -join ':'
-wsl --exec docker compose up --no-build -d --wait
+wsl --exec docker compose -p rustpress up --no-build -d --wait
 ```
 
 Queste immagini rappresentano i sorgenti dell'ultima verifica, non includono
