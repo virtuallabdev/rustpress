@@ -19,7 +19,12 @@ services:
     security_opt: ["no-new-privileges:true"]
   api:
     image: ${RUSTPRESS_API_IMAGE:-rustpress-api:local}
-    build: .
+    build:
+      context: .
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     environment:
       DATABASE_URL: postgres://rustpress:${POSTGRES_PASSWORD:?Set database password}@db:5432/rustpress
       BIND_ADDR: 0.0.0.0:8080
@@ -51,6 +56,9 @@ services:
       dockerfile: web/Dockerfile
       args:
         APP: admin
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     environment:
       NUXT_API_INTERNAL: http://api:8080
     ports: ["127.0.0.1:3001:3000"]
@@ -73,6 +81,9 @@ services:
       dockerfile: web/Dockerfile
       args:
         APP: theme
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     environment:
       NUXT_API_INTERNAL: http://api:8080
       NUXT_PUBLIC_SITE_ORIGIN: http://localhost:3000

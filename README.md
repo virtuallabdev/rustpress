@@ -249,8 +249,9 @@ diversi dall'entry point non ripete il restore delle dipendenze.
 Le modifiche ai sorgenti non ricompilano tutte le dipendenze; evitare
 `cargo clean`, `docker builder prune` e build senza cache nel ciclo ordinario.
 La prima build richiede comunque le dipendenze e una cache vuota non risolve
-problemi di rete: su questo host crates.io da WSL/container va in timeout,
-un'attesa distinta dal tempo del compilatore. Le immagini Nuxt installano e
+problemi di rete: su questo host crates.io da WSL/container andava in timeout
+senza inoltrare il proxy. Il download online e stato poi verificato con il proxy
+configurato come descritto sotto. Le immagini Nuxt installano e
 copiano solo il workspace selezionato e i file condivisi: modificare l'admin
 non invalida la build del tema, e il tema non installa Tiptap.
 Con il registry BuildKit gia popolato si puo forzare anche il restore offline:
@@ -262,6 +263,58 @@ docker build --build-arg CARGO_NET_OFFLINE=true -t rustpress:local .
 Non usare questa opzione con cache vuota: l'assenza di una dipendenza causa
 un errore esplicito, non un fallback. La verifica Linux su questo host ha usato
 una cache inizializzata dai crate pubblici gia presenti sul computer.
+
+### Proxy e CA aziendale durante la build
+
+Compose passa alle tre build `HTTP_PROXY`, `HTTPS_PROXY` e `NO_PROXY` solo
+come argomenti proxy predefiniti di Docker, senza salvarli come `ENV`
+nell'immagine. Se vuoti, la connessione e diretta. Impostarli nella sessione
+o nel file locale `.env` (mai versionare credenziali). Docker non legge
+automaticamente proxy/PAC e certificati dallo store di Windows.
+
+Per una CA aziendale esportare un bundle **PEM di certificati CA**, senza
+chiavi private. Tenerlo fuori dal repository. `RUSTPRESS_BUILD_CA` contiene
+il percorso del file, non il suo contenuto. Abilitare l'override soltanto
+quando serve la CA:
+
+```powershell
+# Assegnare HTTP_PROXY e HTTPS_PROXY secondo le indicazioni della propria rete.
+$env:NO_PROXY = 'localhost,127.0.0.1,::1,api,db,admin,theme'
+$env:RUSTPRESS_BUILD_CA = 'C:\Certificates\corporate-ca.pem'
+docker compose -p rustpress -f compose.yaml -f compose.build-ca.yaml build
+docker compose -p rustpress up -d --wait
+```
+
+Con Docker tramite WSL, inoltrare esplicitamente le variabili e convertire
+il percorso del certificato nel percorso visibile a WSL:
+
+```powershell
+$env:RUSTPRESS_BUILD_CA = (wsl --exec wslpath -a 'C:\Certificates\corporate-ca.pem').Trim()
+$env:WSLENV = (@($env:WSLENV, 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'RUSTPRESS_BUILD_CA') | Where-Object { $_ }) -join ':'
+wsl --exec docker compose -p rustpress -f compose.yaml -f compose.build-ca.yaml build
+wsl --exec docker compose -p rustpress up -d --wait
+```
+
+Senza CA personalizzata usare il normale comando Compose, senza override.
+Una CA configurata ma mancante/vuota provoca un errore, non disabilita TLS.
+BuildKit monta il certificato come secret solo durante `cargo fetch`/`npm ci`.
+Cargo aggiunge la CA al bundle pubblico in memoria temporanea; Node aggiunge
+la CA alle proprie radici. Certificato e impostazioni non passano ai container
+runtime. Dopo una rotazione della CA forzare il passo di restore con
+`docker compose ... build --no-cache`, perche il contenuto dei secret non
+invalida la cache.
+
+Per `docker build` diretto aggiungere `--build-arg HTTP_PROXY`,
+`--build-arg HTTPS_PROXY`, `--build-arg NO_PROXY` e, solo se necessario,
+`--secret id=build_ca,src=<PEM_PATH>` (percorso WSL se si usa WSL).
+Non dichiarare proxy come `ARG`/`ENV` nel Dockerfile e non stampare
+`docker compose config` completo se contiene credenziali.
+
+Queste impostazioni coprono i comandi **RUN** delle build, non i download
+`FROM`/del frontend BuildKit: configurare separatamente proxy e CA del daemon
+Docker/Docker Desktop se falliscono i pull delle immagini. Il proxy deve essere
+raggiungibile dai container; `localhost` indica il container, non Windows.
+Non usare `sslVerify=false`, `strict-ssl=false` o equivalenti.
 
 Misure del 29 ottobre 2026 su questo host, non confronti prima/dopo:
 

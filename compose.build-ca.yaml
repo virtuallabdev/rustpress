@@ -1,0 +1,17 @@
+# Optional build-time CA only; not installed in runtime images.
+services:
+  api:
+    build:
+      secrets:
+        - build_ca
+  admin:
+    build:
+      secrets:
+        - build_ca
+  theme:
+    build:
+      secrets:
+        - build_ca
+secrets:
+  build_ca:
+    file: ${RUSTPRESS_BUILD_CA:?Set the path to a PEM CA certificate bundle}

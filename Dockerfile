@@ -5,6 +5,14 @@ COPY Cargo.toml Cargo.lock ./
 COPY src/main.rs ./src/main.rs
 ARG CARGO_NET_OFFLINE=false
 RUN --mount=type=cache,id=rustpress-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=secret,id=build_ca \
+    --mount=type=tmpfs,target=/build-ca \
+    set -eu; \
+    if [ -f /run/secrets/build_ca ]; then \
+        test -s /run/secrets/build_ca || { echo "build_ca must be a non-empty PEM CA bundle" >&2; exit 1; }; \
+        cat /etc/ssl/certs/ca-certificates.crt /run/secrets/build_ca > /build-ca/bundle.pem; \
+        export CARGO_HTTP_CAINFO=/build-ca/bundle.pem CARGO_HTTP_PROXY_CAINFO=/build-ca/bundle.pem; \
+    fi; \
     cargo fetch --locked
 COPY src ./src
 COPY migrations ./migrations
