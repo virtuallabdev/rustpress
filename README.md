@@ -209,6 +209,12 @@ Per verificare Rust senza generare eseguibili:
 cargo check --locked --all-targets
 ```
 
+Dopo modifiche alle versioni in `Cargo.toml`, eseguire `cargo check --all-targets`
+senza `--locked` per aggiornare `Cargo.lock`, correggere eventuali incompatibilita
+API e versionare entrambi i file. Verificare poi `cargo test --locked --all-targets`.
+Docker usa intenzionalmente `--locked`: non aggiorna dipendenze o lockfile
+durante la costruzione dell'immagine.
+
 Le dipendenze sono ridotte alle funzionalita utilizzate. HTTP OAuth e SQLx
 condividono Rustls/ring: non viene piu compilato anche AWS-LC tramite CMake.
 Le macro SQLx sono una dipendenza esplicita con soli derive e migrazioni,

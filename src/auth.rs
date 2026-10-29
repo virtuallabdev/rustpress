@@ -9,8 +9,8 @@ use axum::{
     http::{HeaderMap, HeaderValue, header, request::Parts},
     response::{IntoResponse, Redirect, Response},
 };
-use hmac::{Hmac, Mac};
-use rand::RngCore;
+use hmac::{Hmac, KeyInit, Mac};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx_macros::FromRow;
@@ -329,6 +329,15 @@ mod tests {
         assert_eq!(
             base64_url(&challenge),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+    #[test]
+    fn hmac_sha256_rfc4231_vector() {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&[0x0b; 20]).unwrap();
+        mac.update(b"Hi There");
+        assert_eq!(
+            hex::encode(mac.finalize().into_bytes()),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
         );
     }
     #[test]
