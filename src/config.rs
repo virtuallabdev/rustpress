@@ -118,6 +118,20 @@ impl Config {
 }
 
 pub fn http_client() -> Result<reqwest::Client> {
+    // Share SQLx's ring backend instead of compiling a second crypto library.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        match rustls::crypto::ring::default_provider().install_default() {
+            Ok(()) => {}
+            Err(_) if rustls::crypto::CryptoProvider::get_default().is_some() => {
+                tracing::debug!("TLS crypto provider initialized concurrently");
+            }
+            Err(_) => {
+                return Err(crate::error::Error::Internal(
+                    "Unable to initialize TLS crypto provider".into(),
+                ));
+            }
+        }
+    }
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(5))
@@ -125,4 +139,20 @@ pub fn http_client() -> Result<reqwest::Client> {
         .https_only(true)
         .build()
         .map_err(|e| crate::error::Error::Internal(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn concurrent_http_clients_initialize_tls_and_require_https() {
+        let clients: Vec<_> = (0..8).map(|_| std::thread::spawn(http_client)).collect();
+        for client in clients {
+            let client = client.join().unwrap().unwrap();
+            let error = client.get("http://127.0.0.1:1/").send().await.unwrap_err();
+            assert!(error.is_builder(), "{error}");
+        }
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
 }

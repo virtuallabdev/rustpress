@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
         .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(&config.database_url)
         .await?;
-    sqlx::migrate!()
+    sqlx_macros::migrate!()
         .run(&pool)
         .await
         .map_err(|e| rustpress::error::Error::Internal(e.to_string()))?;

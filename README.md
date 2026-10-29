@@ -194,6 +194,81 @@ Le migrazioni vengono applicate all'avvio. `cargo run --locked -- migrate`
 esegue solo le migrazioni; usare un unico processo migratore negli ambienti
 gestiti e applicare backup prima delle modifiche allo schema.
 
+### Compilazione rapida
+
+Sito e amministrazione usano solo Nuxt/Vue. Non ci sono frontend Rust/WASM,
+`wasm-pack` o target `wasm32` da compilare. Eventuali dipendenze WASM opzionali
+nei lockfile appartengono agli strumenti o alle piattaforme supportate dalle
+librerie, non a una seconda implementazione del frontend.
+
+Durante lo sviluppo usare `cargo run --locked` e i due comandi `dev:*` sopra:
+le modifiche Vue non richiedono di ricompilare Rust o ricostruire i container.
+Per verificare Rust senza generare eseguibili:
+
+```powershell
+cargo check --locked --all-targets
+```
+
+Le dipendenze sono ridotte alle funzionalita utilizzate. HTTP OAuth e SQLx
+condividono Rustls/ring: non viene piu compilato anche AWS-LC tramite CMake.
+Le macro SQLx sono una dipendenza esplicita con soli derive e migrazioni,
+senza ricompilare il driver PostgreSQL/TLS nel compilatore delle macro.
+Le migrazioni restano incorporate nell'eseguibile e non richiedono file esterni.
+
+Il profilo di sviluppo mantiene numeri di riga/backtrace ma non tutte le
+informazioni sulle variabili del debugger. Per una sessione di debug completa:
+
+```powershell
+$env:CARGO_PROFILE_DEV_DEBUG = '2'
+cargo build --locked
+Remove-Item Env:\CARGO_PROFILE_DEV_DEBUG
+```
+
+`cargo build --release --locked` privilegia build ottimizzate piu rapide
+(16 codegen unit, senza LTO). Il precedente compromesso, piu lento da compilare,
+rimane disponibile per deployment dopo misure delle prestazioni:
+
+```powershell
+cargo build --profile production --locked
+# Container equivalente (anche tramite wsl --exec docker):
+docker build --build-arg CARGO_PROFILE=production -t rustpress:local .
+```
+
+Questo profilo conserva ThinLTO e una sola codegen unit. La velocita runtime
+dei due profili va misurata sul carico reale; non si assume che sia identica.
+
+La build API Docker separa il restore (`cargo fetch`) dalla compilazione offline
+e usa cache BuildKit per registry e artefatti Cargo. Modificare moduli Rust
+diversi dall'entry point non ripete il restore delle dipendenze.
+Le modifiche ai sorgenti non ricompilano tutte le dipendenze; evitare
+`cargo clean`, `docker builder prune` e build senza cache nel ciclo ordinario.
+La prima build richiede comunque le dipendenze e una cache vuota non risolve
+problemi di rete: su questo host crates.io da WSL/container va in timeout,
+un'attesa distinta dal tempo del compilatore. Le immagini Nuxt installano e
+copiano solo il workspace selezionato e i file condivisi: modificare l'admin
+non invalida la build del tema, e il tema non installa Tiptap.
+Con il registry BuildKit gia popolato si puo forzare anche il restore offline:
+
+```powershell
+docker build --build-arg CARGO_NET_OFFLINE=true -t rustpress:local .
+```
+
+Non usare questa opzione con cache vuota: l'assenza di una dipendenza causa
+un errore esplicito, non un fallback. La verifica Linux su questo host ha usato
+una cache inizializzata dai crate pubblici gia presenti sul computer.
+
+Misure del 29 ottobre 2026 su questo host, non confronti prima/dopo:
+
+| Operazione | Tempo |
+| --- | --- |
+| Build release Windows, artefatti release inizialmente assenti | 4 min 39 s |
+| Build release Linux in Docker, crate disponibili ma artefatti assenti | 1 min 18 s |
+| Build Windows senza modifiche, cache calda, dev / release | 1,27 s / 7,07 s |
+| Build Nuxt locale, admin / tema | 23,9 s / 24,2 s |
+
+Il primo build completo non e istantaneo. Per iterare velocemente conservare
+le cache e usare i server di sviluppo, non una build release per ogni modifica.
+
 | Variabile | Significato |
 | --- | --- |
 | `DATABASE_URL` | Connessione PostgreSQL, obbligatoria |

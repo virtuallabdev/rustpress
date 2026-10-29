@@ -13,7 +13,7 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::FromRow;
+use sqlx_macros::FromRow;
 use uuid::Uuid;
 
 pub fn random_token() -> String {

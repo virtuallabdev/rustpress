@@ -50,7 +50,7 @@ Production needs explicit trusted-proxy handling and edge limits before this
 default is suitable for meaningful load.
 
 The database pool is bounded to 20 connections. Pagination, full-text indexes,
-bounded image decoding and release LTO provide a starting point, not proven
+bounded image decoding provide a starting point, not proven
 latency/throughput targets. Text APIs are `no-store` to avoid leaking drafts and
 stale scheduled content. Successfully served immutable generated images receive
 one-year public cache headers. There is no distributed cache or invalidation.
@@ -59,6 +59,14 @@ Agree on hardware, dataset size, traffic shape, p50/p95/p99 latency, throughput,
 error rate, database utilization and image queue behavior before benchmarking.
 Measure public reads separately from editorial transactions and image uploads.
 No performance numbers have been claimed without measurements.
+
+The default release build favors compilation speed: parallel code generation
+and no LTO. For the previous ThinLTO/single-codegen-unit configuration, use
+`cargo build --profile production --locked`, or build the API image with
+`--build-arg CARGO_PROFILE=production`. Benchmark both profiles before choosing
+for deployment. Docker API builds require BuildKit and retain Cargo registry
+and target caches between source changes; a cold cache still requires network
+access to crates.io. The site and administration remain Nuxt-only frontends.
 
 ## Data visibility and retention
 

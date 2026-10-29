@@ -7,24 +7,27 @@ publish = false
 
 [dependencies]
 axum = { version = "=0.8.9", features = ["multipart"] }
-tokio = { version = "1", features = ["full"] }
-sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "chrono", "json", "derive", "migrate", "macros"] }
+tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "chrono", "json", "migrate"] }
+# Only row derives and embedded migrations; no compile-time database queries.
+sqlx-macros = { version = "=0.9.0", default-features = false, features = ["derive", "migrate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-tower-http = { version = "0.6", features = ["trace", "compression-gzip", "fs", "set-header"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11.1"
+hmac = "0.13.0"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23.1"
 pulldown-cmark = "=0.13.5"
 ammonia = "=4.2.4"
-rand = "0.9"
-reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "form"] }
+rand = "0.10.3"
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "json", "form"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 url = "2"
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 
@@ -33,7 +36,15 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
 
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
+lto = false
+codegen-units = 16
+strip = true
+
+[profile.production]
+inherits = "release"
 lto = "thin"
 codegen-units = 1
-strip = true

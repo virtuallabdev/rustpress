@@ -87,7 +87,7 @@ async fn content_lifecycle_and_authorization_are_transactional() {
         "Pre-migration revision must still deserialize"
     );
     upgrade.rollback().await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    sqlx_macros::migrate!().run(&pool).await.unwrap();
     let directory = tempfile::tempdir().unwrap();
     tokio::fs::create_dir(directory.path().join("public"))
         .await

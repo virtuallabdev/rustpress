@@ -67,7 +67,7 @@ pub struct ContentInput {
     pub version: Option<i32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Deserialize, Serialize, sqlx_macros::FromRow)]
 pub struct Content {
     pub id: Uuid,
     pub content_type: String,
@@ -90,7 +90,7 @@ pub struct Content {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize, Serialize, sqlx::FromRow)]
+#[derive(Debug, Deserialize, Serialize, sqlx_macros::FromRow)]
 pub struct ContentType {
     pub slug: String,
     pub name: String,
